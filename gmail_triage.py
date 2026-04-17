@@ -115,7 +115,7 @@ def _extract_email_fields(service, msg_info: dict) -> dict:
 
 def fetch_unread_emails(service, hours_back: int, max_emails: int) -> list[dict]:
     """未読メールを取得し、必要なフィールドを抽出"""
-    query = f"is:unread newer_than:{hours_back}h"
+    query = f"is:unread -is:starred newer_than:{hours_back}h"
     results = service.users().messages().list(userId="me", q=query, maxResults=max_emails).execute()
 
     messages = results.get("messages", [])
@@ -127,7 +127,7 @@ def fetch_unread_emails(service, hours_back: int, max_emails: int) -> list[dict]
 
 def fetch_all_message_ids(service, hours_back: int | None, logger: logging.Logger) -> list[dict]:
     """未読に限らず全メールのID一覧を取得（ページネーション対応、メタデータは取得しない）"""
-    query = f"newer_than:{hours_back}h" if hours_back else ""
+    query = f"-is:starred newer_than:{hours_back}h" if hours_back else "-is:starred"
     all_messages = []
     page_token = None
 
