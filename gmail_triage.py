@@ -61,6 +61,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Gmail トリアージ自動化")
     parser.add_argument("--dry-run", action="store_true", help="削除せずプレビューのみ")
     parser.add_argument("--hours", type=int, default=None, help="対象とする直近の時間数")
+    parser.add_argument("--all", action="store_true", help="未読に限らず全メールを対象にする（手動実行用）")
+    parser.add_argument("--batch", type=int, default=50, help="1バッチあたりの処理件数（--all 時に有効、デフォルト50）")
     return parser.parse_args()
 
 
@@ -97,6 +99,20 @@ def authenticate_gmail() -> Credentials:
     return creds
 
 
+def _extract_email_fields(service, msg_info: dict) -> dict:
+    """メール1通の必要フィールドを抽出"""
+    msg = service.users().messages().get(userId="me", id=msg_info["id"], format="metadata",
+                                          metadataHeaders=["From", "Subject", "Date"]).execute()
+    headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
+    return {
+        "id": msg_info["id"],
+        "from": headers.get("From", ""),
+        "subject": headers.get("Subject", ""),
+        "date": headers.get("Date", ""),
+        "snippet": msg.get("snippet", ""),
+    }
+
+
 def fetch_unread_emails(service, hours_back: int, max_emails: int) -> list[dict]:
     """未読メールを取得し、必要なフィールドを抽出"""
     query = f"is:unread newer_than:{hours_back}h"
@@ -106,20 +122,28 @@ def fetch_unread_emails(service, hours_back: int, max_emails: int) -> list[dict]
     if not messages:
         return []
 
-    emails = []
-    for msg_info in messages:
-        msg = service.users().messages().get(userId="me", id=msg_info["id"], format="metadata",
-                                              metadataHeaders=["From", "Subject", "Date"]).execute()
-        headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
-        emails.append({
-            "id": msg_info["id"],
-            "from": headers.get("From", ""),
-            "subject": headers.get("Subject", ""),
-            "date": headers.get("Date", ""),
-            "snippet": msg.get("snippet", ""),
-        })
+    return [_extract_email_fields(service, m) for m in messages]
 
-    return emails
+
+def fetch_all_emails(service, hours_back: int, batch_size: int, logger: logging.Logger) -> list[dict]:
+    """未読に限らず全メールを取得（ページネーション対応）"""
+    query = f"newer_than:{hours_back}h"
+    all_messages = []
+    page_token = None
+
+    while True:
+        results = service.users().messages().list(
+            userId="me", q=query, maxResults=500, pageToken=page_token,
+        ).execute()
+        messages = results.get("messages", [])
+        if messages:
+            all_messages.extend(messages)
+        page_token = results.get("nextPageToken")
+        if not page_token:
+            break
+
+    logger.info(f"全メール取得: {len(all_messages)}通（バッチサイズ: {batch_size}）")
+    return [_extract_email_fields(service, m) for m in all_messages]
 
 
 def classify_emails(emails: list[dict], logger: logging.Logger) -> dict | None:
@@ -239,7 +263,10 @@ def send_discord_notification(classification: dict, config: dict, logger: loggin
 
     try:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(webhook_url, data=data, headers={"Content-Type": "application/json"})
+        req = urllib.request.Request(webhook_url, data=data, headers={
+            "Content-Type": "application/json",
+            "User-Agent": "gmail-triage",
+        })
         urllib.request.urlopen(req)
         logger.info("Discord通知: 送信完了")
     except Exception as e:
@@ -263,10 +290,39 @@ def send_error_notification(error_msg: str, config: dict) -> None:
 
     try:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(webhook_url, data=data, headers={"Content-Type": "application/json"})
+        req = urllib.request.Request(webhook_url, data=data, headers={
+            "Content-Type": "application/json",
+            "User-Agent": "gmail-triage",
+        })
         urllib.request.urlopen(req)
     except Exception:
         pass  # エラー通知の失敗はログに記録済みなので無視
+
+
+def _process_batch(service, emails: list[dict], config: dict, logger: logging.Logger) -> dict:
+    """メールのバッチを分類・アクション実行し、結果を返す"""
+    classification = classify_with_retry(emails, logger)
+    stats = classification.get("stats", {})
+    logger.info(
+        f"Claude 分類完了: important={stats.get('important', 0)}, "
+        f"review={stats.get('review', 0)}, keep={stats.get('keep', 0)}, "
+        f"delete={stats.get('delete', 0)}"
+    )
+    execute_actions(service, classification, config["dry_run"], logger)
+    return classification
+
+
+def _merge_classifications(classifications: list[dict]) -> dict:
+    """複数バッチの分類結果をマージ"""
+    merged_results = []
+    merged_stats = {"total": 0, "important": 0, "review": 0, "keep": 0, "delete": 0}
+
+    for c in classifications:
+        merged_results.extend(c.get("results", []))
+        for key in merged_stats:
+            merged_stats[key] += c.get("stats", {}).get(key, 0)
+
+    return {"results": merged_results, "stats": merged_stats}
 
 
 def main() -> None:
@@ -274,35 +330,39 @@ def main() -> None:
     config = get_config(args)
     logger = setup_logging()
 
-    logger.info(f"開始: 直近{config['hours_back']}時間の未読メール取得 (dry_run={config['dry_run']})")
+    mode = "全メール" if args.all else "未読メール"
+    logger.info(f"開始: 直近{config['hours_back']}時間の{mode}取得 (dry_run={config['dry_run']})")
 
     try:
         # Gmail API 認証
         creds = authenticate_gmail()
         service = build("gmail", "v1", credentials=creds)
 
-        # 未読メール取得
-        emails = fetch_unread_emails(service, config["hours_back"], config["max_emails"])
-        logger.info(f"取得: {len(emails)}通")
+        # メール取得
+        if args.all:
+            emails = fetch_all_emails(service, config["hours_back"], args.batch, logger)
+        else:
+            emails = fetch_unread_emails(service, config["hours_back"], config["max_emails"])
+            logger.info(f"取得: {len(emails)}通")
 
         if not emails:
-            logger.info("未読メールなし。終了します。")
+            logger.info("対象メールなし。終了します。")
             return
 
-        # Claude CLI で分類
-        classification = classify_with_retry(emails, logger)
-        stats = classification.get("stats", {})
-        logger.info(
-            f"Claude 分類完了: important={stats.get('important', 0)}, "
-            f"review={stats.get('review', 0)}, keep={stats.get('keep', 0)}, "
-            f"delete={stats.get('delete', 0)}"
-        )
+        # バッチ分割して処理
+        batch_size = args.batch if args.all else len(emails)
+        classifications = []
+        for i in range(0, len(emails), batch_size):
+            batch = emails[i:i + batch_size]
+            batch_num = i // batch_size + 1
+            total_batches = (len(emails) + batch_size - 1) // batch_size
+            if total_batches > 1:
+                logger.info(f"バッチ {batch_num}/{total_batches} ({len(batch)}通)")
+            classifications.append(_process_batch(service, batch, config, logger))
 
-        # アクション実行
-        execute_actions(service, classification, config["dry_run"], logger)
-
-        # Discord 通知
-        send_discord_notification(classification, config, logger)
+        # 結果をマージして Discord 通知
+        merged = _merge_classifications(classifications) if len(classifications) > 1 else classifications[0]
+        send_discord_notification(merged, config, logger)
 
         logger.info("完了")
 

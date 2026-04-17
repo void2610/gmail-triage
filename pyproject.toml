@@ -9,5 +9,9 @@ dependencies = [
     "python-dotenv",
 ]
 
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project.scripts]
 gmail-triage = "gmail_triage:main"
