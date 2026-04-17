@@ -1,15 +1,15 @@
 # Gmail Triage
 
-Claude Code CLI を使って Gmail の未読メールを自動分類し、不要メールをゴミ箱に移動、重要メールを Discord に通知する。
+Claude Code CLI を使って Gmail のメールを自動分類し、不要メールをゴミ箱に移動、重要メールを Discord に通知する。
 
 ## 仕組み
 
 ```
 cron (毎朝 7:00)
   └─ gmail_triage.py
-       ├─ Gmail API: 未読メール取得
+       ├─ Gmail API: メール取得
        ├─ Claude CLI: SKILL.md のルールでメールを分類
-       ├─ Gmail API: 不要メール → ゴミ箱
+       ├─ Gmail API: ラベル付与 + 不要メール → ゴミ箱
        └─ Discord Webhook: 重要メールの要約を投稿
 ```
 
@@ -17,12 +17,12 @@ cron (毎朝 7:00)
 
 | カテゴリ | action | 処理 |
 |---------|--------|------|
-| 🔴 重要 | `important` | Discord に通知 |
-| 🟡 確認 | `review` | Discord に通知 |
-| ⚪ 保留 | `keep` | 何もしない |
-| 🗑️ 不要 | `delete` | ゴミ箱に移動 |
+| 🔴 重要 | `important` | `triage/important` ラベル + Discord 通知 |
+| 🟡 確認 | `review` | `triage/review` ラベル + Discord 通知 |
+| ⚪ 保留 | `keep` | `triage/keep` ラベル |
+| 🗑️ 不要 | `delete` | `triage/delete` ラベル + ゴミ箱に移動 |
 
-分類ルールは `SKILL.md` を編集するだけで調整できる。
+分類ルールは `SKILL.md` を編集するだけで調整できる。Gmail 上でラベルによるフィルタで分類結果を確認可能。
 
 ## セットアップ
 
@@ -75,7 +75,7 @@ crontab -e
 ## 使い方
 
 ```bash
-# 通常実行
+# 通常実行（直近24時間の未読メール）
 uv run gmail-triage
 
 # ドライラン（削除せずプレビュー）
@@ -85,11 +85,18 @@ uv run gmail-triage --dry-run
 uv run gmail-triage --hours 48
 
 # 全メール対象（未読以外も含む、手動実行用）
+uv run gmail-triage --all
+
+# 全メール + ドライラン
 uv run gmail-triage --all --dry-run
 
-# バッチサイズ指定（デフォルト50）
-uv run gmail-triage --all --batch 20
+# バッチサイズ指定（デフォルト20）
+uv run gmail-triage --all --batch 10
 ```
+
+### --all モード
+
+受信トレイの全メールを対象にする。バッチ単位（デフォルト20件）でメタデータ取得→分類→アクション実行を繰り返す。`--hours` を指定しなければ時間制限なし。バッチごとに Discord 通知が送信され、全バッチ完了後に合計サマリーも通知される。
 
 ## 分類ルールのカスタマイズ
 
@@ -97,4 +104,4 @@ uv run gmail-triage --all --batch 20
 
 例:
 - 特定の送信者を常に `keep` にしたい → ホワイトリストセクションを追加
-- GitHub 通知を全部 `delete` にしたい → delete ルールに追記
+- 特定のニュースレターを残したい → keep ルールに追記

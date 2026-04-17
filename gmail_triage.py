@@ -62,7 +62,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="削除せずプレビューのみ")
     parser.add_argument("--hours", type=int, default=None, help="対象とする直近の時間数")
     parser.add_argument("--all", action="store_true", help="未読に限らず全メールを対象にする（手動実行用）")
-    parser.add_argument("--batch", type=int, default=50, help="1バッチあたりの処理件数（--all 時に有効、デフォルト50）")
+    parser.add_argument("--batch", type=int, default=20, help="1バッチあたりの処理件数（--all 時に有効、デフォルト20）")
     return parser.parse_args()
 
 
@@ -125,9 +125,9 @@ def fetch_unread_emails(service, hours_back: int, max_emails: int) -> list[dict]
     return [_extract_email_fields(service, m) for m in messages]
 
 
-def fetch_all_emails(service, hours_back: int, batch_size: int, logger: logging.Logger) -> list[dict]:
-    """未読に限らず全メールを取得（ページネーション対応）"""
-    query = f"newer_than:{hours_back}h"
+def fetch_all_message_ids(service, hours_back: int | None, logger: logging.Logger) -> list[dict]:
+    """未読に限らず全メールのID一覧を取得（ページネーション対応、メタデータは取得しない）"""
+    query = f"newer_than:{hours_back}h" if hours_back else ""
     all_messages = []
     page_token = None
 
@@ -142,8 +142,13 @@ def fetch_all_emails(service, hours_back: int, batch_size: int, logger: logging.
         if not page_token:
             break
 
-    logger.info(f"全メール取得: {len(all_messages)}通（バッチサイズ: {batch_size}）")
-    return [_extract_email_fields(service, m) for m in all_messages]
+    logger.info(f"全メールID取得: {len(all_messages)}通")
+    return all_messages
+
+
+def fetch_email_batch(service, message_ids: list[dict], logger: logging.Logger) -> list[dict]:
+    """メールID一覧からバッチ分のメタデータを取得"""
+    return [_extract_email_fields(service, m) for m in message_ids]
 
 
 def classify_emails(emails: list[dict], logger: logging.Logger) -> dict | None:
@@ -200,25 +205,71 @@ def classify_with_retry(emails: list[dict], logger: logging.Logger) -> dict:
     }
 
 
-def execute_actions(service, classification: dict, dry_run: bool, logger: logging.Logger) -> None:
-    """分類結果に基づきアクションを実行（delete → ゴミ箱移動）"""
+TRIAGE_LABELS = {
+    "important": "triage/important",
+    "review": "triage/review",
+    "keep": "triage/keep",
+    "delete": "triage/delete",
+}
+
+
+def ensure_triage_labels(service, logger: logging.Logger) -> dict[str, str]:
+    """トリアージ用ラベルを作成（既存なら再利用）し、action→ラベルIDのマッピングを返す"""
+    existing = service.users().labels().list(userId="me").execute().get("labels", [])
+    name_to_id = {l["name"]: l["id"] for l in existing}
+
+    action_to_label_id = {}
+    for action, label_name in TRIAGE_LABELS.items():
+        if label_name in name_to_id:
+            action_to_label_id[action] = name_to_id[label_name]
+        else:
+            created = service.users().labels().create(userId="me", body={
+                "name": label_name,
+                "labelListVisibility": "labelShow",
+                "messageListVisibility": "show",
+            }).execute()
+            action_to_label_id[action] = created["id"]
+            logger.info(f"ラベル作成: {label_name}")
+
+    return action_to_label_id
+
+
+def execute_actions(service, classification: dict, dry_run: bool, label_ids: dict[str, str],
+                    logger: logging.Logger) -> None:
+    """分類結果に基づきアクションを実行（ラベル付与 + delete → ゴミ箱移動）"""
     delete_count = 0
     for item in classification["results"]:
-        if item["action"] == "delete":
+        action = item["action"]
+        msg_id = item["id"]
+
+        # ラベル付与
+        if action in label_ids:
             if dry_run:
-                logger.info(f"[DRY RUN] ゴミ箱移動スキップ: {item['id']} ({item.get('reason', '')})")
+                logger.info(f"[DRY RUN] ラベル付与スキップ: {msg_id} → {TRIAGE_LABELS[action]} ({item.get('reason', '')})")
             else:
                 try:
-                    service.users().messages().trash(userId="me", id=item["id"]).execute()
+                    service.users().messages().modify(userId="me", id=msg_id, body={
+                        "addLabelIds": [label_ids[action]],
+                    }).execute()
+                except Exception as e:
+                    logger.error(f"ラベル付与失敗 ({msg_id}): {e}")
+
+        # delete はゴミ箱に移動
+        if action == "delete":
+            if dry_run:
+                logger.info(f"[DRY RUN] ゴミ箱移動スキップ: {msg_id} ({item.get('reason', '')})")
+            else:
+                try:
+                    service.users().messages().trash(userId="me", id=msg_id).execute()
                     delete_count += 1
                 except Exception as e:
-                    logger.error(f"ゴミ箱移動失敗 ({item['id']}): {e}")
+                    logger.error(f"ゴミ箱移動失敗 ({msg_id}): {e}")
 
     if not dry_run and delete_count > 0:
         logger.info(f"削除: {delete_count}通をゴミ箱に移動")
 
 
-def send_discord_notification(classification: dict, config: dict, logger: logging.Logger) -> None:
+def send_discord_notification(classification: dict, config: dict, logger: logging.Logger, *, label: str = "") -> None:
     """Discord Webhook で重要・確認メールの要約を通知"""
     webhook_url = config["discord_webhook_url"]
     if not webhook_url:
@@ -252,7 +303,7 @@ def send_discord_notification(classification: dict, config: dict, logger: loggin
 
     payload = {
         "embeds": [{
-            "title": "📬 朝のメールトリアージ",
+            "title": f"📬 メールトリアージ{f' ({label})' if label else ''}",
             "color": 5814783,
             "description": f"**{stats.get('total', 0)}通**を処理しました",
             "fields": fields,
@@ -299,7 +350,8 @@ def send_error_notification(error_msg: str, config: dict) -> None:
         pass  # エラー通知の失敗はログに記録済みなので無視
 
 
-def _process_batch(service, emails: list[dict], config: dict, logger: logging.Logger) -> dict:
+def _process_batch(service, emails: list[dict], config: dict, label_ids: dict[str, str],
+                    logger: logging.Logger) -> dict:
     """メールのバッチを分類・アクション実行し、結果を返す"""
     classification = classify_with_retry(emails, logger)
     stats = classification.get("stats", {})
@@ -308,7 +360,7 @@ def _process_batch(service, emails: list[dict], config: dict, logger: logging.Lo
         f"review={stats.get('review', 0)}, keep={stats.get('keep', 0)}, "
         f"delete={stats.get('delete', 0)}"
     )
-    execute_actions(service, classification, config["dry_run"], logger)
+    execute_actions(service, classification, config["dry_run"], label_ids, logger)
     return classification
 
 
@@ -331,38 +383,55 @@ def main() -> None:
     logger = setup_logging()
 
     mode = "全メール" if args.all else "未読メール"
-    logger.info(f"開始: 直近{config['hours_back']}時間の{mode}取得 (dry_run={config['dry_run']})")
+    hours_label = f"直近{config['hours_back']}時間の" if not args.all or args.hours else ""
+    logger.info(f"開始: {hours_label}{mode}取得 (dry_run={config['dry_run']})")
 
     try:
         # Gmail API 認証
         creds = authenticate_gmail()
         service = build("gmail", "v1", credentials=creds)
 
-        # メール取得
+        # トリアージ用ラベルを準備
+        label_ids = ensure_triage_labels(service, logger)
+
+        # メール取得・処理
         if args.all:
-            emails = fetch_all_emails(service, config["hours_back"], args.batch, logger)
+            # --all: ID一覧を先に取得し、バッチごとにメタデータ取得→分類→アクション
+            hours = args.hours if args.hours else None
+            message_ids = fetch_all_message_ids(service, hours, logger)
+
+            if not message_ids:
+                logger.info("対象メールなし。終了します。")
+                return
+
+            batch_size = args.batch
+            total_batches = (len(message_ids) + batch_size - 1) // batch_size
+            classifications = []
+            for i in range(0, len(message_ids), batch_size):
+                batch_ids = message_ids[i:i + batch_size]
+                batch_num = i // batch_size + 1
+                logger.info(f"バッチ {batch_num}/{total_batches}: メタデータ取得中 ({len(batch_ids)}通)")
+                emails = fetch_email_batch(service, batch_ids, logger)
+                result = _process_batch(service, emails, config, label_ids, logger)
+                classifications.append(result)
+                # バッチごとにDiscord通知
+                send_discord_notification(result, config, logger, label=f"バッチ {batch_num}/{total_batches}")
         else:
             emails = fetch_unread_emails(service, config["hours_back"], config["max_emails"])
             logger.info(f"取得: {len(emails)}通")
 
-        if not emails:
-            logger.info("対象メールなし。終了します。")
-            return
+            if not emails:
+                logger.info("未読メールなし。終了します。")
+                return
 
-        # バッチ分割して処理
-        batch_size = args.batch if args.all else len(emails)
-        classifications = []
-        for i in range(0, len(emails), batch_size):
-            batch = emails[i:i + batch_size]
-            batch_num = i // batch_size + 1
-            total_batches = (len(emails) + batch_size - 1) // batch_size
-            if total_batches > 1:
-                logger.info(f"バッチ {batch_num}/{total_batches} ({len(batch)}通)")
-            classifications.append(_process_batch(service, batch, config, logger))
+            classifications = [_process_batch(service, emails, config, label_ids, logger)]
 
-        # 結果をマージして Discord 通知
-        merged = _merge_classifications(classifications) if len(classifications) > 1 else classifications[0]
-        send_discord_notification(merged, config, logger)
+        # Discord 通知（通常モードは1回、--all はバッチごとに送信済みなので合計のみ）
+        if args.all and len(classifications) > 1:
+            merged = _merge_classifications(classifications)
+            send_discord_notification(merged, config, logger, label="合計")
+        elif not args.all:
+            send_discord_notification(classifications[0], config, logger)
 
         logger.info("完了")
 
