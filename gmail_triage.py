@@ -157,8 +157,9 @@ def classify_emails(emails: list[dict], logger: logging.Logger) -> dict | None:
     input_json = json.dumps({"emails": emails}, ensure_ascii=False)
 
     try:
+        claude_path = os.getenv("CLAUDE_PATH", "claude")
         result = subprocess.run(
-            ["claude", "--print", "--model", "sonnet", "--append-system-prompt", skill_content],
+            [claude_path, "--print", "--model", "sonnet", "--append-system-prompt", skill_content],
             input=input_json,
             capture_output=True,
             text=True,
@@ -207,7 +208,6 @@ def classify_with_retry(emails: list[dict], logger: logging.Logger) -> dict:
 
 TRIAGE_LABELS = {
     "important": "triage/important",
-    "review": "triage/review",
     "keep": "triage/keep",
     "delete": "triage/delete",
 }
@@ -279,9 +279,8 @@ def send_discord_notification(classification: dict, config: dict, logger: loggin
     stats = classification.get("stats", {})
     results = classification.get("results", [])
 
-    # 重要・確認メールを抽出
+    # 重要メールを抽出
     important_items = [r for r in results if r["action"] == "important"]
-    review_items = [r for r in results if r["action"] == "review"]
 
     fields = []
 
@@ -289,13 +288,8 @@ def send_discord_notification(classification: dict, config: dict, logger: loggin
         value = "\n".join(f"• {item.get('summary', item.get('reason', ''))}" for item in important_items)
         fields.append({"name": f"🔴 重要 ({len(important_items)})", "value": value})
 
-    if review_items:
-        value = "\n".join(f"• {item.get('summary', item.get('reason', ''))}" for item in review_items)
-        fields.append({"name": f"🟡 確認 ({len(review_items)})", "value": value})
-
     stats_text = (
         f"重要: {stats.get('important', 0)} / "
-        f"確認: {stats.get('review', 0)} / "
         f"保留: {stats.get('keep', 0)} / "
         f"削除: {stats.get('delete', 0)}"
     )
