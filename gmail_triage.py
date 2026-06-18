@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -84,18 +85,32 @@ def authenticate_gmail() -> Credentials:
         creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
 
     if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-    elif not creds or not creds.valid:
+        try:
+            creds.refresh(Request())
+        except RefreshError as e:
+            # invalid_grant は refresh token の失効・取り消しが主因。古い token.json を捨てて再認証に切り替える。
+            if TOKEN_FILE.exists():
+                TOKEN_FILE.unlink()
+            creds = None
+
+            if not sys.stdin.isatty() or not sys.stdout.isatty():
+                raise RuntimeError(
+                    "Google OAuth トークンが失効または取り消されています。"
+                    f" {TOKEN_FILE.name} を削除したため、次回は手動で再認証が必要です。"
+                    " ターミナルで `uv run gmail-triage --dry-run` を実行して再認証してください。"
+                ) from e
+
+    if not creds or not creds.valid:
         if not CREDENTIALS_FILE.exists():
             raise FileNotFoundError(
                 f"credentials.json が見つかりません: {CREDENTIALS_FILE}\n"
                 "Google Cloud Console から OAuth クライアント ID をダウンロードしてください。"
             )
         flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_FILE), SCOPES)
-        creds = flow.run_local_server(port=0)
+        creds = flow.run_local_server(port=0, access_type="offline", prompt="consent")
 
     # トークンを保存
-    TOKEN_FILE.write_text(creds.to_json())
+    TOKEN_FILE.write_text(creds.to_json(), encoding="utf-8")
     return creds
 
 
@@ -173,7 +188,13 @@ def classify_emails(emails: list[dict], logger: logging.Logger) -> dict | None:
         return None
 
     if result.returncode != 0:
-        logger.error(f"Claude CLI エラー: {result.stderr}")
+        error_output = (result.stderr or result.stdout).strip()
+        if "Invalid authentication credentials" in error_output:
+            logger.error(
+                "Claude CLI 認証エラー: Invalid authentication credentials. "
+                "`claude auth login` または API キー設定を確認してください。"
+            )
+        logger.error(f"Claude CLI エラー: {error_output or f'returncode={result.returncode}'}")
         return None
 
     # JSON を抽出（```json ブロックの可能性を考慮）
