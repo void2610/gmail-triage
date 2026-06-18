@@ -62,6 +62,27 @@ uv run gmail-triage --dry-run
 
 ブラウザが開くので Google アカウントで認可する。`token.json` が自動生成される。
 
+#### トークン失効時の再認証
+
+`invalid_grant: Token has been expired or revoked.` が出た場合は、保存済みの OAuth トークンが無効になっている。
+
+```bash
+uv run gmail-triage --dry-run
+```
+
+最新版では失効した `token.json` を自動で破棄する。ターミナルで上のコマンドを実行するとブラウザ認証が再度走る。`cron` 実行中はブラウザを開けないため、一度手動で再認証してから定期実行に戻す。
+
+#### Claude CLI 認証エラー時
+
+`Claude CLI 認証エラー: Invalid authentication credentials.` が出た場合は、Claude Code CLI 側の認証が切れているか、`ANTHROPIC_API_KEY` が無効。
+
+```bash
+claude auth login
+claude auth status
+```
+
+API キー運用の場合は `ANTHROPIC_API_KEY` の値を確認する。再認証後に `uv run gmail-triage --dry-run` で再実行する。
+
 ### 5. cron 登録
 
 ```bash
