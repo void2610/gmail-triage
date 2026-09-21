@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """Gmail トリアージ自動化スクリプト
 
-未読メールを Claude Code CLI で分類し、不要メールを削除・重要メールを Discord に通知する。
+未読メールを Jev (TypeSafe AI System One) で分類し、不要メールを削除・重要メールを Discord に通知する。
 """
 
 import argparse
 import json
 import logging
 import os
-import re
-import subprocess
 import sys
 import urllib.request
 from datetime import datetime, timezone
@@ -22,6 +20,9 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
+import jev_classifier
+from claude_cli import summarize_important
+
 # .env 読み込み
 load_dotenv()
 
@@ -30,7 +31,6 @@ SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 BASE_DIR = Path(__file__).resolve().parent
 CREDENTIALS_FILE = BASE_DIR / "credentials.json"
 TOKEN_FILE = BASE_DIR / "token.json"
-SKILL_FILE = BASE_DIR / "SKILL.md"
 LOG_DIR = BASE_DIR / "logs"
 
 
@@ -164,67 +164,6 @@ def fetch_all_message_ids(service, hours_back: int | None, logger: logging.Logge
 def fetch_email_batch(service, message_ids: list[dict], logger: logging.Logger) -> list[dict]:
     """メールID一覧からバッチ分のメタデータを取得"""
     return [_extract_email_fields(service, m) for m in message_ids]
-
-
-def classify_emails(emails: list[dict], logger: logging.Logger) -> dict | None:
-    """Claude Code CLI でメールを分類"""
-    skill_content = SKILL_FILE.read_text(encoding="utf-8")
-    input_json = json.dumps({"emails": emails}, ensure_ascii=False)
-
-    try:
-        claude_path = os.getenv("CLAUDE_PATH", "claude")
-        result = subprocess.run(
-            [claude_path, "--print", "--model", "sonnet", "--append-system-prompt", skill_content],
-            input=input_json,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-    except subprocess.TimeoutExpired:
-        logger.error("Claude CLI がタイムアウトしました")
-        return None
-    except FileNotFoundError:
-        logger.error("claude コマンドが見つかりません。Claude Code CLI がインストールされているか確認してください。")
-        return None
-
-    if result.returncode != 0:
-        error_output = (result.stderr or result.stdout).strip()
-        if "Invalid authentication credentials" in error_output:
-            logger.error(
-                "Claude CLI 認証エラー: Invalid authentication credentials. "
-                "`claude auth login` または API キー設定を確認してください。"
-            )
-        logger.error(f"Claude CLI エラー: {error_output or f'returncode={result.returncode}'}")
-        return None
-
-    # JSON を抽出（```json ブロックの可能性を考慮）
-    output = result.stdout.strip()
-    json_match = re.search(r"```json\s*(.*?)\s*```", output, re.DOTALL)
-    if json_match:
-        output = json_match.group(1)
-
-    try:
-        return json.loads(output)
-    except json.JSONDecodeError:
-        logger.error(f"Claude の応答を JSON としてパースできません: {output[:200]}")
-        return None
-
-
-def classify_with_retry(emails: list[dict], logger: logging.Logger) -> dict:
-    """分類をリトライ付きで実行。失敗時は全メール keep 扱い"""
-    for attempt in range(2):
-        result = classify_emails(emails, logger)
-        if result and "results" in result:
-            return result
-        if attempt == 0:
-            logger.warning("分類リトライ中...")
-
-    # 全メール keep 扱い
-    logger.warning("分類に失敗しました。全メールを keep 扱いにします。")
-    return {
-        "results": [{"id": e["id"], "action": "keep", "reason": "分類失敗", "summary": ""} for e in emails],
-        "stats": {"total": len(emails), "important": 0, "review": 0, "keep": len(emails), "delete": 0},
-    }
 
 
 TRIAGE_LABELS = {
@@ -365,16 +304,29 @@ def send_error_notification(error_msg: str, config: dict) -> None:
         pass  # エラー通知の失敗はログに記録済みなので無視
 
 
+def _attach_summaries(classification: dict, emails: list[dict], logger: logging.Logger) -> None:
+    """important メールの要約を Claude で生成して結果に埋める（Jev は文字列を生成できない）"""
+    by_id = {e["id"]: e for e in emails}
+    important = [r for r in classification["results"] if r["action"] == "important"]
+    if not important:
+        return
+
+    summaries = summarize_important([by_id[r["id"]] for r in important], logger)
+    for item in important:
+        item["summary"] = summaries.get(item["id"]) or by_id[item["id"]].get("subject", "")
+
+
 def _process_batch(service, emails: list[dict], config: dict, label_ids: dict[str, str],
                     logger: logging.Logger) -> dict:
     """メールのバッチを分類・アクション実行し、結果を返す"""
-    classification = classify_with_retry(emails, logger)
+    classification = jev_classifier.classify(emails, logger)
     stats = classification.get("stats", {})
     logger.info(
-        f"Claude 分類完了: important={stats.get('important', 0)}, "
-        f"review={stats.get('review', 0)}, keep={stats.get('keep', 0)}, "
-        f"delete={stats.get('delete', 0)}"
+        f"分類完了: important={stats.get('important', 0)}, "
+        f"keep={stats.get('keep', 0)}, delete={stats.get('delete', 0)} "
+        f"(Claude エスカレーション {stats.get('escalated', 0)}通)"
     )
+    _attach_summaries(classification, emails, logger)
     execute_actions(service, classification, config["dry_run"], label_ids, logger)
     return classification
 
@@ -382,7 +334,7 @@ def _process_batch(service, emails: list[dict], config: dict, label_ids: dict[st
 def _merge_classifications(classifications: list[dict]) -> dict:
     """複数バッチの分類結果をマージ"""
     merged_results = []
-    merged_stats = {"total": 0, "important": 0, "review": 0, "keep": 0, "delete": 0}
+    merged_stats = {"total": 0, "important": 0, "keep": 0, "delete": 0, "escalated": 0}
 
     for c in classifications:
         merged_results.extend(c.get("results", []))

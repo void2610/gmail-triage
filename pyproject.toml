@@ -7,11 +7,20 @@ dependencies = [
     "google-api-python-client",
     "google-auth-oauthlib",
     "python-dotenv",
+    "typesafe-sdk>=0.7.0",
 ]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
 [project.scripts]
 gmail-triage = "gmail_triage:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
