@@ -5,11 +5,16 @@
 """
 
 import argparse
+import base64
+import html
 import json
 import logging
 import os
+import re
 import sys
+import threading
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -32,6 +37,10 @@ BASE_DIR = Path(__file__).resolve().parent
 CREDENTIALS_FILE = BASE_DIR / "credentials.json"
 TOKEN_FILE = BASE_DIR / "token.json"
 LOG_DIR = BASE_DIR / "logs"
+MAX_BODY_CHARS = int(os.getenv("MAX_BODY_CHARS", "4000"))
+GMAIL_CONCURRENCY = int(os.getenv("GMAIL_CONCURRENCY", "8"))
+
+_thread_local = threading.local()
 
 
 def setup_logging() -> logging.Logger:
@@ -114,21 +123,68 @@ def authenticate_gmail() -> Credentials:
     return creds
 
 
+def _gmail_service(creds: Credentials):
+    """httplib2 がスレッドセーフでないため、service はスレッドごとに作る"""
+    if not hasattr(_thread_local, "service"):
+        _thread_local.service = build("gmail", "v1", credentials=creds)
+    return _thread_local.service
+
+
+def _decode_part(part: dict) -> str:
+    """MIME パートの本文を base64url からデコード"""
+    data = part.get("body", {}).get("data", "")
+    if not data:
+        return ""
+    return base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
+
+
+def _strip_html(markup: str) -> str:
+    """HTML メールから本文テキストだけを取り出す"""
+    text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", markup, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return html.unescape(text)
+
+
+def _extract_body(payload: dict) -> str:
+    """MIME ツリーを走査して本文を抽出。text/plain を優先し、無ければ HTML を平文化する"""
+    plain, markup = [], []
+
+    def walk(part: dict) -> None:
+        mime = part.get("mimeType", "")
+        if mime == "text/plain":
+            plain.append(_decode_part(part))
+        elif mime == "text/html":
+            markup.append(_decode_part(part))
+        for child in part.get("parts", []):
+            walk(child)
+
+    walk(payload)
+    text = "\n".join(plain) or _strip_html("\n".join(markup))
+    return re.sub(r"[ \t\r\f\v]+", " ", text).strip()
+
+
 def _extract_email_fields(service, msg_info: dict) -> dict:
     """メール1通の必要フィールドを抽出"""
-    msg = service.users().messages().get(userId="me", id=msg_info["id"], format="metadata",
-                                          metadataHeaders=["From", "Subject", "Date"]).execute()
-    headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
+    msg = service.users().messages().get(userId="me", id=msg_info["id"], format="full").execute()
+    payload = msg.get("payload", {})
+    headers = {h["name"]: h["value"] for h in payload.get("headers", [])}
     return {
         "id": msg_info["id"],
         "from": headers.get("From", ""),
         "subject": headers.get("Subject", ""),
         "date": headers.get("Date", ""),
         "snippet": msg.get("snippet", ""),
+        "body": _extract_body(payload)[:MAX_BODY_CHARS],
     }
 
 
-def fetch_unread_emails(service, hours_back: int, max_emails: int) -> list[dict]:
+def _fetch_fields_parallel(creds: Credentials, message_ids: list[dict]) -> list[dict]:
+    """本文取得は1通ずつのAPI呼び出しになるため並列化する"""
+    with ThreadPoolExecutor(max_workers=GMAIL_CONCURRENCY) as pool:
+        return list(pool.map(lambda m: _extract_email_fields(_gmail_service(creds), m), message_ids))
+
+
+def fetch_unread_emails(creds: Credentials, service, hours_back: int, max_emails: int) -> list[dict]:
     """未読メールを取得し、必要なフィールドを抽出"""
     query = f"is:unread -is:starred newer_than:{hours_back}h"
     results = service.users().messages().list(userId="me", q=query, maxResults=max_emails).execute()
@@ -137,7 +193,7 @@ def fetch_unread_emails(service, hours_back: int, max_emails: int) -> list[dict]
     if not messages:
         return []
 
-    return [_extract_email_fields(service, m) for m in messages]
+    return _fetch_fields_parallel(creds, messages)
 
 
 def fetch_all_message_ids(service, hours_back: int | None, logger: logging.Logger) -> list[dict]:
@@ -161,9 +217,9 @@ def fetch_all_message_ids(service, hours_back: int | None, logger: logging.Logge
     return all_messages
 
 
-def fetch_email_batch(service, message_ids: list[dict], logger: logging.Logger) -> list[dict]:
-    """メールID一覧からバッチ分のメタデータを取得"""
-    return [_extract_email_fields(service, m) for m in message_ids]
+def fetch_email_batch(creds: Credentials, message_ids: list[dict], logger: logging.Logger) -> list[dict]:
+    """メールID一覧からバッチ分のメールを取得"""
+    return _fetch_fields_parallel(creds, message_ids)
 
 
 TRIAGE_LABELS = {
@@ -377,14 +433,14 @@ def main() -> None:
             for i in range(0, len(message_ids), batch_size):
                 batch_ids = message_ids[i:i + batch_size]
                 batch_num = i // batch_size + 1
-                logger.info(f"バッチ {batch_num}/{total_batches}: メタデータ取得中 ({len(batch_ids)}通)")
-                emails = fetch_email_batch(service, batch_ids, logger)
+                logger.info(f"バッチ {batch_num}/{total_batches}: メール取得中 ({len(batch_ids)}通)")
+                emails = fetch_email_batch(creds, batch_ids, logger)
                 result = _process_batch(service, emails, config, label_ids, logger)
                 classifications.append(result)
                 # バッチごとにDiscord通知
                 send_discord_notification(result, config, logger, label=f"バッチ {batch_num}/{total_batches}")
         else:
-            emails = fetch_unread_emails(service, config["hours_back"], config["max_emails"])
+            emails = fetch_unread_emails(creds, service, config["hours_back"], config["max_emails"])
             logger.info(f"取得: {len(emails)}通")
 
             if not emails:

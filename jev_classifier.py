@@ -46,7 +46,7 @@ def _email_state(email: dict) -> dict:
         "from": email.get("from", ""),
         "subject": email.get("subject", ""),
         "date": email.get("date", ""),
-        "body_preview": email.get("snippet", ""),
+        "body": email.get("body") or email.get("snippet", ""),
     }
 
 

@@ -7,7 +7,7 @@ TypeSafe AI の Jev (System One モデル) で Gmail のメールを自動分類
 ```
 cron (毎朝 7:00)
   └─ gmail_triage.py
-       ├─ Gmail API: メール取得
+       ├─ Gmail API: メール取得（本文込み、並列8）
        ├─ Jev: triage_questions.json の criteria で 1通ずつ並列分類
        │    └─ confidence が閾値未満のメールのみ Claude CLI (SKILL.md) で再判定
        ├─ Claude CLI: important メールの要約だけ生成
@@ -32,11 +32,19 @@ Jev は文字列を生成せず、型付きの設問を 1 パスで並列評価�
 
 | | 実測値 |
 |---|---|
+| Gmail 取得 (本文込み、並列8) | 2.0 秒 |
 | Jev の分類 | 1.6 秒 (40ms/通、並列8) |
-| Claude 再判定に回った割合 | 12.5% (5/40通) |
-| 全体 (再判定 + important の要約含む) | 約15 秒 |
+| Claude 再判定に回った割合 | 10.0% (4/40通) |
+| 全体 (再判定 + important の要約含む) | 約18 秒 |
 
 再判定は該当メールをまとめて 1 回の Claude 呼び出しに送るため、エスカレーション率が上がっても呼び出し回数は増えない。
+
+判定には件名・差出人に加えて**本文全文**を渡す (`MAX_BODY_CHARS` で上限、既定 4000 文字)。
+Jev の入力は 100 万トークンあたり $0.042 と安いので、本文を渡すコストより誤判定を減らす利得が大きい。
+実際、Cloudflare の「請求書がご利用いただけます」は件名だけでは `important` 寄り (0.52) だったが、
+本文に請求額 $0 が含まれることで `delete` (0.80) に動いた。
+
+本文取得は 1 通ずつの API 呼び出しになるため、`GMAIL_CONCURRENCY` (既定 8) で並列化している。
 
 ### confidence ゲーティング
 
@@ -182,6 +190,8 @@ uv run gmail-triage --all --batch 10
 `not_for` と `examples` は取り違えやすいカテゴリの分離に効くので、誤分類を見つけたら該当カテゴリの `examples` に実例を足すのが最も手軽な調整方法。
 
 変更後は `--dry-run` で確認してからデプロイ。Claude 再判定側の基準は `SKILL.md` にあるので、大きくルールを変えたら両方を揃える。
+
+`examples` を 2 行足しただけでエスカレーション率が 22.5% → 12.5% に下がり、判定ラベルは 1 件も変わらなかった実績がある。閾値を動かすより先に `examples` を試すとよい。
 
 閾値は `.env` の `JEV_CONFIDENCE_THRESHOLD` / `JEV_DELETE_THRESHOLD` で調整する。誤削除が気になるなら `JEV_DELETE_THRESHOLD` を上げる (Claude 再判定に回る件数が増える)。
 
