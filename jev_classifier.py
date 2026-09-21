@@ -21,16 +21,15 @@ SKILL_FILE = BASE_DIR / "SKILL.md"
 QUESTION_KEY = "action"
 VALID_ACTIONS = ("important", "keep", "delete")
 
-# 判定を採用する confidence の下限。delete はゴミ箱送りで取り消しに手間がかかるため高く設定する
-DEFAULT_THRESHOLD = float(os.getenv("JEV_CONFIDENCE_THRESHOLD", "0.5"))
-DELETE_THRESHOLD = float(os.getenv("JEV_DELETE_THRESHOLD", "0.9"))
-
 
 def _thresholds() -> dict[str, float]:
+    """判定を採用する confidence の下限。import 時に読むと load_dotenv() より先になるため実行時に読む"""
+    default = float(os.getenv("JEV_CONFIDENCE_THRESHOLD", "0.5"))
     return {
-        "important": DEFAULT_THRESHOLD,
-        "keep": DEFAULT_THRESHOLD,
-        "delete": DELETE_THRESHOLD,
+        "important": default,
+        "keep": default,
+        # ゴミ箱送りは取り消しに手間がかかるため高くする
+        "delete": float(os.getenv("JEV_DELETE_THRESHOLD", "0.9")),
     }
 
 
@@ -50,7 +49,9 @@ def _email_state(email: dict) -> dict:
     }
 
 
-def _classify_one(client: TypeSafeClient, question: Choice, email: dict) -> dict:
+def _classify_one(
+    client: TypeSafeClient, question: Choice, email: dict, thresholds: dict[str, float]
+) -> dict:
     """メール1通を Jev で判定。失敗時は needs_escalation を立てる"""
     try:
         response = client.system_one(
@@ -64,7 +65,7 @@ def _classify_one(client: TypeSafeClient, question: Choice, email: dict) -> dict
         }
 
     answer = response.choices[QUESTION_KEY]
-    below_threshold = answer.confidence < _thresholds()[answer.choice]
+    below_threshold = answer.confidence < thresholds[answer.choice]
     return {
         "id": email["id"],
         "action": answer.choice,
@@ -91,12 +92,15 @@ def _escalate(emails: list[dict], logger: logging.Logger) -> dict[str, dict]:
 def classify(emails: list[dict], logger: logging.Logger) -> dict:
     """メール一覧を分類する。Jev で並列判定し、低信頼分のみ Claude へ回す"""
     question = _build_question()
+    thresholds = _thresholds()
     concurrency = int(os.getenv("JEV_CONCURRENCY", "8"))
 
     with TypeSafeClient(model=os.getenv("TYPESAFE_MODEL", "jev-latest")) as client:
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
             verdicts = list(
-                pool.map(lambda e: _classify_one(client, question, e), emails)
+                pool.map(
+                    lambda e: _classify_one(client, question, e, thresholds), emails
+                )
             )
 
     by_id = {e["id"]: e for e in emails}
