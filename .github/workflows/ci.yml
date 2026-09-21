@@ -22,4 +22,4 @@ jobs:
         run: uv run pytest -q
 
       - name: フォーマット確認
-        run: uv run ruff format --check jev_classifier.py claude_cli.py tests/
+        run: uv run ruff format --check gmail_fetch.py jev_classifier.py claude_cli.py tests/
