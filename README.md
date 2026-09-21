@@ -7,13 +7,26 @@ TypeSafe AI の Jev (System One モデル) で Gmail のメールを自動分類
 ```
 cron (毎朝 7:00)
   └─ gmail_triage.py
-       ├─ Gmail API: メール取得（本文込み、並列8）
+       ├─ gmail_fetch: メール取得（本文込み、並列8）
        ├─ Jev: triage_questions.json の criteria で 1通ずつ並列分類
        │    └─ confidence が閾値未満のメールのみ Claude CLI (SKILL.md) で再判定
        ├─ Claude CLI: important メールの要約だけ生成
        ├─ Gmail API: ラベル付与 + 不要メール → ゴミ箱
        └─ Discord Webhook: 重要メールの要約を投稿
 ```
+
+### モジュール構成
+
+| モジュール | 責務 |
+|---|---|
+| `gmail_triage.py` | 認証、ラベル操作、Discord 通知、全体のオーケストレーション |
+| `gmail_fetch.py` | Gmail からのメール取得と本文の平文化 |
+| `jev_classifier.py` | Jev による分類と confidence ゲーティング |
+| `claude_cli.py` | Claude CLI 呼び出し（再判定・要約） |
+
+環境変数は**どのモジュールも import 時ではなく実行時に読む**。
+`gmail_triage.py` が `load_dotenv()` を呼ぶより先に各モジュールが import されるため、
+モジュール定数として `os.getenv` を書くと `.env` の設定が黙って無視される。
 
 ### なぜ Jev か
 

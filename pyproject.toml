@@ -1,7 +1,7 @@
 [project]
 name = "gmail-triage"
 version = "0.1.0"
-description = "Gmail トリアージ自動化 - Claude Code CLI でメールを分類し、不要メール削除・重要メール Discord 通知"
+description = "Gmail トリアージ自動化 - Jev でメールを分類し、不要メール削除・重要メール Discord 通知"
 requires-python = ">=3.13"
 dependencies = [
     "google-api-python-client",
