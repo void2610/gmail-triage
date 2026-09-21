@@ -135,7 +135,9 @@ def _decode_part(part: dict) -> str:
     data = part.get("body", {}).get("data", "")
     if not data:
         return ""
-    return base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
+    # base64url はパディング省略が許されており、省略されていると urlsafe_b64decode が例外を投げる
+    padded = data + "=" * (-len(data) % 4)
+    return base64.urlsafe_b64decode(padded).decode("utf-8", errors="replace")
 
 
 def _strip_html(markup: str) -> str:
