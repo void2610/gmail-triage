@@ -26,13 +26,8 @@ def _hours_filter(hours_back: int | None) -> str:
     return f" newer_than:{hours_back}h" if hours_back else ""
 
 
-def unread_query(hours_back: int | None) -> str:
-    """未読メール取得のクエリ。ログのサマリにも出すため公開する"""
-    return "is:unread -is:starred" + _hours_filter(hours_back)
-
-
-def all_query(hours_back: int | None) -> str:
-    """全メール取得のクエリ。ログのサマリにも出すため公開する"""
+def triage_query(hours_back: int | None) -> str:
+    """トリアージ対象のクエリ。ログのサマリにも出すため公開する"""
     return "-is:starred" + _hours_filter(hours_back)
 
 
@@ -110,29 +105,11 @@ def _fetch_fields_parallel(creds: Credentials, message_ids: list[dict]) -> list[
         )
 
 
-def fetch_unread_emails(creds: Credentials, hours_back: int | None) -> list[dict]:
-    """未読メールを取得し、必要なフィールドを抽出"""
-    query = unread_query(hours_back)
-    results = (
-        _gmail_service(creds)
-        .users()
-        .messages()
-        .list(userId="me", q=query, maxResults=PAGE_SIZE)
-        .execute()
-    )
-
-    messages = results.get("messages", [])
-    if not messages:
-        return []
-
-    return _fetch_fields_parallel(creds, messages)
-
-
-def fetch_all_message_ids(
+def fetch_message_ids(
     creds: Credentials, hours_back: int | None, logger: logging.Logger
 ) -> list[dict]:
-    """未読に限らず全メールのID一覧を取得（ページネーション対応、本文は取得しない）"""
-    query = all_query(hours_back)
+    """対象メールのID一覧を取得（ページネーション対応、本文は取得しない）"""
+    query = triage_query(hours_back)
     all_messages = []
     page_token = None
 

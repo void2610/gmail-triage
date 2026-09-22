@@ -65,8 +65,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Gmail トリアージ自動化")
     parser.add_argument("--dry-run", action="store_true", help="削除せずプレビューのみ")
     parser.add_argument("--hours", type=int, default=None, help="対象とする直近の時間数（省略時は期間で絞らない）")
-    parser.add_argument("--all", action="store_true", help="未読に限らず全メールを対象にする（手動実行用）")
-    parser.add_argument("--batch", type=int, default=20, help="1バッチあたりの処理件数（--all 時に有効、デフォルト20）")
+    parser.add_argument("--batch", type=int, default=20, help="1バッチあたりの処理件数（デフォルト20）")
     return parser.parse_args()
 
 
@@ -321,9 +320,7 @@ def main() -> None:
     config = get_config(args)
     logger = setup_logging()
 
-    mode = "全メール" if args.all else "未読メール"
-    hours_label = f"直近{args.hours}時間の" if args.hours else "全期間の"
-    target = f"{hours_label}{mode}"
+    target = f"直近{args.hours}時間のメール" if args.hours else "全期間のメール"
     logger.info(f"開始: {target}取得 (dry_run={config['dry_run']})")
 
     started = time.monotonic()
@@ -338,48 +335,31 @@ def main() -> None:
         # トリアージ用ラベルを準備
         label_ids = ensure_triage_labels(service, logger)
 
-        # メール取得・処理
-        if args.all:
-            # --all: ID一覧を先に取得し、バッチごとにメタデータ取得→分類→アクション
-            query = gmail_fetch.all_query(args.hours)
-            t0 = time.monotonic()
-            message_ids = gmail_fetch.fetch_all_message_ids(creds, args.hours, logger)
+        # ID一覧を先に取得し、バッチごとにメタデータ取得→分類→アクション
+        query = gmail_fetch.triage_query(args.hours)
+        t0 = time.monotonic()
+        message_ids = gmail_fetch.fetch_message_ids(creds, args.hours, logger)
 
-            if not message_ids:
-                logger.info("対象メールなし。終了します。")
-                return
+        if not message_ids:
+            logger.info("対象メールなし。終了します。")
+            return
 
-            batch_size = args.batch
-            total_batches = (len(message_ids) + batch_size - 1) // batch_size
-            classifications = []
-            for i in range(0, len(message_ids), batch_size):
-                batch_ids = message_ids[i:i + batch_size]
-                batch_num = i // batch_size + 1
-                logger.info(f"バッチ {batch_num}/{total_batches}: メール取得中 ({len(batch_ids)}通)")
-                emails = gmail_fetch.fetch_email_batch(creds, batch_ids)
-                timings["fetch"] = time.monotonic() - t0 - timings.get("classify", 0)
-                result = _process_batch(service, emails, config, label_ids, logger, timings)
-                classifications.append(result)
-                # バッチごとにDiscord通知
-                send_discord_notification(result, config, logger, label=f"バッチ {batch_num}/{total_batches}")
-        else:
-            query = gmail_fetch.unread_query(config["hours_back"])
-            t0 = time.monotonic()
-            emails = gmail_fetch.fetch_unread_emails(creds, config["hours_back"])
-            timings["fetch"] = time.monotonic() - t0
-            logger.info(f"取得: {len(emails)}通")
+        batch_size = args.batch
+        total_batches = (len(message_ids) + batch_size - 1) // batch_size
+        classifications = []
+        for i in range(0, len(message_ids), batch_size):
+            batch_ids = message_ids[i : i + batch_size]
+            batch_num = i // batch_size + 1
+            logger.info(f"バッチ {batch_num}/{total_batches}: メール取得中 ({len(batch_ids)}通)")
+            emails = gmail_fetch.fetch_email_batch(creds, batch_ids)
+            timings["fetch"] = time.monotonic() - t0 - timings.get("classify", 0)
+            result = _process_batch(service, emails, config, label_ids, logger, timings)
+            classifications.append(result)
+            send_discord_notification(result, config, logger, label=f"バッチ {batch_num}/{total_batches}")
 
-            if not emails:
-                logger.info("未読メールなし。終了します。")
-                return
-
-            classifications = [_process_batch(service, emails, config, label_ids, logger, timings)]
-
-        # Discord 通知（通常モードは1回、--all はバッチごとに送信済みなので合計のみ）
-        if args.all and len(classifications) > 1:
+        # バッチごとに送信済みなので、複数バッチのときだけ合計を送る
+        if len(classifications) > 1:
             send_discord_notification(_merge_classifications(classifications), config, logger, label="合計")
-        elif not args.all:
-            send_discord_notification(classifications[0], config, logger)
 
         merged = _merge_classifications(classifications)
         operations = {}
