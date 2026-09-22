@@ -88,10 +88,8 @@ def test_本文は上限文字数で打ち切られる(monkeypatch):
 
 
 def test_期間を指定しなければクエリに期間条件を付けない():
-    assert gmail_fetch.unread_query(None) == "is:unread -is:starred"
-    assert gmail_fetch.all_query(None) == "-is:starred"
+    assert gmail_fetch.triage_query(None) == "-is:starred"
 
 
 def test_期間を指定するとクエリに期間条件が入る():
-    assert gmail_fetch.unread_query(48) == "is:unread -is:starred newer_than:48h"
-    assert gmail_fetch.all_query(48) == "-is:starred newer_than:48h"
+    assert gmail_fetch.triage_query(48) == "-is:starred newer_than:48h"
