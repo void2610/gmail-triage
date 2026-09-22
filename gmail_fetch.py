@@ -146,9 +146,7 @@ def fetch_message_ids(
     starred = starred_thread_ids(creds)
     kept = [m for m in messages if m["threadId"] not in starred]
 
-    excluded = len(messages) - len(kept)
-    suffix = f"（スター付きスレッド {excluded}通を除外）" if excluded else ""
-    logger.info(f"対象ID取得: {len(kept)}通{suffix}")
+    logger.info(f"対象ID取得: {len(kept)}通")
     return kept
 
 
