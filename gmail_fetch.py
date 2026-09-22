@@ -26,6 +26,16 @@ def _concurrency() -> int:
     return int(os.getenv("GMAIL_CONCURRENCY", "8"))
 
 
+def unread_query(hours_back: int) -> str:
+    """未読メール取得のクエリ。ログのサマリにも出すため公開する"""
+    return f"is:unread -is:starred newer_than:{hours_back}h"
+
+
+def all_query(hours_back: int | None) -> str:
+    """全メール取得のクエリ。ログのサマリにも出すため公開する"""
+    return f"-is:starred newer_than:{hours_back}h" if hours_back else "-is:starred"
+
+
 def _gmail_service(creds: Credentials):
     """httplib2 がスレッドセーフでないため、service はスレッドごとに作る"""
     if not hasattr(_thread_local, "service"):
@@ -104,7 +114,7 @@ def fetch_unread_emails(
     creds: Credentials, hours_back: int, max_emails: int
 ) -> list[dict]:
     """未読メールを取得し、必要なフィールドを抽出"""
-    query = f"is:unread -is:starred newer_than:{hours_back}h"
+    query = unread_query(hours_back)
     results = (
         _gmail_service(creds)
         .users()
@@ -124,7 +134,7 @@ def fetch_all_message_ids(
     creds: Credentials, hours_back: int | None, logger: logging.Logger
 ) -> list[dict]:
     """未読に限らず全メールのID一覧を取得（ページネーション対応、本文は取得しない）"""
-    query = f"-is:starred newer_than:{hours_back}h" if hours_back else "-is:starred"
+    query = all_query(hours_back)
     all_messages = []
     page_token = None
 

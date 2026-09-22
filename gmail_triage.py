@@ -7,6 +7,7 @@
 import argparse
 import json
 import logging
+import time
 import os
 import sys
 import urllib.request
@@ -22,6 +23,7 @@ from googleapiclient.discovery import build
 
 import gmail_fetch
 import jev_classifier
+import log_format
 from claude_cli import summarize_important
 
 # .env 読み込み
@@ -144,38 +146,43 @@ def ensure_triage_labels(service, logger: logging.Logger) -> dict[str, str]:
 
 
 def execute_actions(service, classification: dict, dry_run: bool, label_ids: dict[str, str],
-                    logger: logging.Logger) -> None:
-    """分類結果に基づきアクションを実行（ラベル付与 + delete → ゴミ箱移動）"""
-    delete_count = 0
+                    logger: logging.Logger) -> dict[str, str]:
+    """分類結果に基づきアクションを実行し、メールID→操作内容 を返す"""
+    operations = {}
     for item in classification["results"]:
         action = item["action"]
         msg_id = item["id"]
+        done = []
 
         # ラベル付与
         if action in label_ids:
             if dry_run:
-                logger.info(f"[DRY RUN] ラベル付与スキップ: {msg_id} → {TRIAGE_LABELS[action]} ({item.get('reason', '')})")
+                done.append(TRIAGE_LABELS[action])
             else:
                 try:
                     service.users().messages().modify(userId="me", id=msg_id, body={
                         "addLabelIds": [label_ids[action]],
                     }).execute()
+                    done.append(TRIAGE_LABELS[action])
                 except Exception as e:
                     logger.error(f"ラベル付与失敗 ({msg_id}): {e}")
+                    done.append("ラベル失敗")
 
         # delete はゴミ箱に移動
         if action == "delete":
             if dry_run:
-                logger.info(f"[DRY RUN] ゴミ箱移動スキップ: {msg_id} ({item.get('reason', '')})")
+                done.append("ゴミ箱")
             else:
                 try:
                     service.users().messages().trash(userId="me", id=msg_id).execute()
-                    delete_count += 1
+                    done.append("ゴミ箱")
                 except Exception as e:
                     logger.error(f"ゴミ箱移動失敗 ({msg_id}): {e}")
+                    done.append("削除失敗")
 
-    if not dry_run and delete_count > 0:
-        logger.info(f"削除: {delete_count}通をゴミ箱に移動")
+        operations[msg_id] = "ゴミ箱へ" if "ゴミ箱" in done else ("ラベルのみ" if done else "なし")
+
+    return operations
 
 
 def send_discord_notification(classification: dict, config: dict, logger: logging.Logger, *, label: str = "") -> None:
@@ -265,18 +272,35 @@ def _attach_summaries(classification: dict, emails: list[dict], logger: logging.
         item["summary"] = summaries.get(item["id"]) or by_id[item["id"]].get("subject", "")
 
 
-def _process_batch(service, emails: list[dict], config: dict, label_ids: dict[str, str],
-                    logger: logging.Logger) -> dict:
-    """メールのバッチを分類・アクション実行し、結果を返す"""
-    classification = jev_classifier.classify(emails, logger)
-    stats = classification.get("stats", {})
+def _log_verdict_table(classification: dict, emails: list[dict], operations: dict[str, str],
+                       logger: logging.Logger) -> None:
+    """1通ごとの判定を桁揃えした表で出す"""
+    by_id = {e["id"]: e for e in emails}
+    colorize = log_format.supports_color()
+
+    # 重要なものから順に並べ、同じ判定の中では確信度が低い順にする（要確認のものが上に来る）
+    order = {"important": 0, "keep": 1, "delete": 2}
+    rows = sorted(classification["results"], key=lambda r: (order.get(r["action"], 9), r.get("reason", "")))
+
     logger.info(
-        f"分類完了: important={stats.get('important', 0)}, "
-        f"keep={stats.get('keep', 0)}, delete={stats.get('delete', 0)} "
-        f"(Claude エスカレーション {stats.get('escalated', 0)}通)"
+        log_format.verdict_table(
+            [(item, by_id.get(item["id"], {}), operations.get(item["id"], "なし")) for item in rows],
+            colorize=colorize,
+        )
     )
+
+
+def _process_batch(service, emails: list[dict], config: dict, label_ids: dict[str, str],
+                    logger: logging.Logger, timings: dict) -> dict:
+    """メールのバッチを分類・アクション実行し、結果を返す"""
+    t0 = time.monotonic()
+    classification = jev_classifier.classify(emails, logger)
     _attach_summaries(classification, emails, logger)
-    execute_actions(service, classification, config["dry_run"], label_ids, logger)
+    timings["classify"] = timings.get("classify", 0) + time.monotonic() - t0
+
+    operations = execute_actions(service, classification, config["dry_run"], label_ids, logger)
+    _log_verdict_table(classification, emails, operations, logger)
+    classification["operations"] = operations
     return classification
 
 
@@ -300,7 +324,12 @@ def main() -> None:
 
     mode = "全メール" if args.all else "未読メール"
     hours_label = f"直近{config['hours_back']}時間の" if not args.all or args.hours else ""
-    logger.info(f"開始: {hours_label}{mode}取得 (dry_run={config['dry_run']})")
+    target = f"{hours_label}{mode}"
+    logger.info(f"開始: {target}取得 (dry_run={config['dry_run']})")
+
+    started = time.monotonic()
+    timings: dict[str, float] = {}
+    query = ""
 
     try:
         # Gmail API 認証
@@ -314,6 +343,8 @@ def main() -> None:
         if args.all:
             # --all: ID一覧を先に取得し、バッチごとにメタデータ取得→分類→アクション
             hours = args.hours if args.hours else None
+            query = gmail_fetch.all_query(hours)
+            t0 = time.monotonic()
             message_ids = gmail_fetch.fetch_all_message_ids(creds, hours, logger)
 
             if not message_ids:
@@ -328,28 +359,49 @@ def main() -> None:
                 batch_num = i // batch_size + 1
                 logger.info(f"バッチ {batch_num}/{total_batches}: メール取得中 ({len(batch_ids)}通)")
                 emails = gmail_fetch.fetch_email_batch(creds, batch_ids)
-                result = _process_batch(service, emails, config, label_ids, logger)
+                timings["fetch"] = time.monotonic() - t0 - timings.get("classify", 0)
+                result = _process_batch(service, emails, config, label_ids, logger, timings)
                 classifications.append(result)
                 # バッチごとにDiscord通知
                 send_discord_notification(result, config, logger, label=f"バッチ {batch_num}/{total_batches}")
         else:
+            query = gmail_fetch.unread_query(config["hours_back"])
+            t0 = time.monotonic()
             emails = gmail_fetch.fetch_unread_emails(creds, config["hours_back"], config["max_emails"])
+            timings["fetch"] = time.monotonic() - t0
             logger.info(f"取得: {len(emails)}通")
 
             if not emails:
                 logger.info("未読メールなし。終了します。")
                 return
 
-            classifications = [_process_batch(service, emails, config, label_ids, logger)]
+            classifications = [_process_batch(service, emails, config, label_ids, logger, timings)]
 
         # Discord 通知（通常モードは1回、--all はバッチごとに送信済みなので合計のみ）
         if args.all and len(classifications) > 1:
-            merged = _merge_classifications(classifications)
-            send_discord_notification(merged, config, logger, label="合計")
+            send_discord_notification(_merge_classifications(classifications), config, logger, label="合計")
         elif not args.all:
             send_discord_notification(classifications[0], config, logger)
 
-        logger.info("完了")
+        merged = _merge_classifications(classifications)
+        operations = {}
+        for c in classifications:
+            operations.update(c.get("operations", {}))
+        timings["total"] = time.monotonic() - started
+        logger.info(
+            "\n"
+            + log_format.summary(
+                target=target,
+                query=query,
+                stats=merged["stats"],
+                operations={
+                    "trashed": sum(1 for v in operations.values() if v == "ゴミ箱へ"),
+                    "labeled": sum(1 for v in operations.values() if v == "ラベルのみ"),
+                },
+                dry_run=config["dry_run"],
+                timings=timings,
+            )
+        )
 
     except Exception as e:
         logger.error(f"致命的エラー: {e}")
