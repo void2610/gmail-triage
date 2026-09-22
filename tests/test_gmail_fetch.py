@@ -87,9 +87,9 @@ def test_本文は上限文字数で打ち切られる(monkeypatch):
     assert captured["format"] == "full"
 
 
-def test_期間を指定しなければクエリに期間条件を付けない():
-    assert gmail_fetch.triage_query(None) == "-is:starred"
+def test_対象は受信トレイのスターなしに限られる():
+    assert gmail_fetch.triage_query(None) == "in:inbox -is:starred"
 
 
 def test_期間を指定するとクエリに期間条件が入る():
-    assert gmail_fetch.triage_query(48) == "-is:starred newer_than:48h"
+    assert gmail_fetch.triage_query(48) == "in:inbox -is:starred newer_than:48h"

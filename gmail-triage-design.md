@@ -143,7 +143,7 @@ token.json なし → credentials.json で OAuth フロー（初回のみブラ�
 
 ```
 Gmail API: users.messages.list
-  query: "-is:starred[ newer_than:{hours}h]"
+  query: "in:inbox -is:starred[ newer_than:{hours}h]"
   maxResults: 500（ページネーションで全件辿る）
 
 各メールの取得フィールド:
@@ -255,7 +255,7 @@ Gmail API: users.messages.trash(id=メールID)
 2026-04-17 07:00:07 [INFO]
 ── サマリ ────────────────────────────────────────────────────
   対象    : 全期間のメール
-  クエリ  : -is:starred
+  クエリ  : in:inbox -is:starred
   取得    : 19通 (1.2秒)
   分類    : important=1 keep=6 delete=12 / Claude再判定 2通 (3.4秒)
   操作    : ゴミ箱 12通 / ラベルのみ 7通
@@ -315,7 +315,7 @@ crontab -e
 ## コマンドライン引数
 
 ```
-uv run gmail-triage              # スター以外の全メール、期間指定なし
+uv run gmail-triage              # 受信トレイのスターなし全件、期間指定なし
 uv run gmail-triage --dry-run    # 削除せずプレビュー
 uv run gmail-triage --hours 48   # 直近48時間に絞る
 uv run gmail-triage --batch 10   # バッチサイズを変える

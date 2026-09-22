@@ -28,7 +28,8 @@ def _hours_filter(hours_back: int | None) -> str:
 
 def triage_query(hours_back: int | None) -> str:
     """トリアージ対象のクエリ。ログのサマリにも出すため公開する"""
-    return "-is:starred" + _hours_filter(hours_back)
+    # in:inbox が無いと送信済み・アーカイブ済み・迷惑メール・ゴミ箱まで対象に入る
+    return "in:inbox -is:starred" + _hours_filter(hours_back)
 
 
 def _gmail_service(creds: Credentials):
