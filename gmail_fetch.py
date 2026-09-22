@@ -6,7 +6,6 @@
 import base64
 import html
 import logging
-import os
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -16,24 +15,25 @@ from googleapiclient.discovery import build
 
 _thread_local = threading.local()
 
-
-def _max_body_chars() -> int:
-    """import 時に読むと呼び出し側の load_dotenv() より先になるため実行時に読む"""
-    return int(os.getenv("MAX_BODY_CHARS", "4000"))
-
-
-def _concurrency() -> int:
-    return int(os.getenv("GMAIL_CONCURRENCY", "8"))
+# Jev に渡す本文の長さ。冒頭だけで判定できるうえ、長文をそのまま送ると分類が遅くなる
+MAX_BODY_CHARS = 4000
+CONCURRENCY = 8
+# Gmail の list API が 1 ページで返せる上限
+PAGE_SIZE = 500
 
 
-def unread_query(hours_back: int) -> str:
+def _hours_filter(hours_back: int | None) -> str:
+    return f" newer_than:{hours_back}h" if hours_back else ""
+
+
+def unread_query(hours_back: int | None) -> str:
     """未読メール取得のクエリ。ログのサマリにも出すため公開する"""
-    return f"is:unread -is:starred newer_than:{hours_back}h"
+    return "is:unread -is:starred" + _hours_filter(hours_back)
 
 
 def all_query(hours_back: int | None) -> str:
     """全メール取得のクエリ。ログのサマリにも出すため公開する"""
-    return f"-is:starred newer_than:{hours_back}h" if hours_back else "-is:starred"
+    return "-is:starred" + _hours_filter(hours_back)
 
 
 def _gmail_service(creds: Credentials):
@@ -96,13 +96,13 @@ def _extract_email_fields(service, msg_info: dict) -> dict:
         "subject": headers.get("Subject", ""),
         "date": headers.get("Date", ""),
         "snippet": msg.get("snippet", ""),
-        "body": _extract_body(payload)[: _max_body_chars()],
+        "body": _extract_body(payload)[:MAX_BODY_CHARS],
     }
 
 
 def _fetch_fields_parallel(creds: Credentials, message_ids: list[dict]) -> list[dict]:
     """本文取得は1通ずつのAPI呼び出しになるため並列化する"""
-    with ThreadPoolExecutor(max_workers=_concurrency()) as pool:
+    with ThreadPoolExecutor(max_workers=CONCURRENCY) as pool:
         return list(
             pool.map(
                 lambda m: _extract_email_fields(_gmail_service(creds), m), message_ids
@@ -110,16 +110,14 @@ def _fetch_fields_parallel(creds: Credentials, message_ids: list[dict]) -> list[
         )
 
 
-def fetch_unread_emails(
-    creds: Credentials, hours_back: int, max_emails: int
-) -> list[dict]:
+def fetch_unread_emails(creds: Credentials, hours_back: int | None) -> list[dict]:
     """未読メールを取得し、必要なフィールドを抽出"""
     query = unread_query(hours_back)
     results = (
         _gmail_service(creds)
         .users()
         .messages()
-        .list(userId="me", q=query, maxResults=max_emails)
+        .list(userId="me", q=query, maxResults=PAGE_SIZE)
         .execute()
     )
 
@@ -143,7 +141,7 @@ def fetch_all_message_ids(
             _gmail_service(creds)
             .users()
             .messages()
-            .list(userId="me", q=query, maxResults=500, pageToken=page_token)
+            .list(userId="me", q=query, maxResults=PAGE_SIZE, pageToken=page_token)
             .execute()
         )
         messages = results.get("messages", [])

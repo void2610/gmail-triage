@@ -6,9 +6,10 @@ important メールの要約生成という 2 用途のみで使われる。
 
 import json
 import logging
-import os
 import re
 import subprocess
+
+CLAUDE_PATH = "claude"
 
 # Jev が文字列を生成できないため、要約だけは言語モデルに委ねる
 SUMMARY_PROMPT = """あなたはメール要約アシスタントです。与えられた重要メール一覧について、各メールの要点を30文字以内で要約してください。
@@ -30,10 +31,9 @@ def run_json(
 ) -> dict | None:
     """Claude CLI を呼び出して JSON 応答をパースする。失敗時は None"""
     try:
-        claude_path = os.getenv("CLAUDE_PATH", "claude")
         result = subprocess.run(
             [
-                claude_path,
+                CLAUDE_PATH,
                 "--print",
                 "--model",
                 "sonnet",

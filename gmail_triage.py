@@ -64,19 +64,18 @@ def parse_args() -> argparse.Namespace:
     """コマンドライン引数をパース"""
     parser = argparse.ArgumentParser(description="Gmail トリアージ自動化")
     parser.add_argument("--dry-run", action="store_true", help="削除せずプレビューのみ")
-    parser.add_argument("--hours", type=int, default=None, help="対象とする直近の時間数")
+    parser.add_argument("--hours", type=int, default=None, help="対象とする直近の時間数（省略時は期間で絞らない）")
     parser.add_argument("--all", action="store_true", help="未読に限らず全メールを対象にする（手動実行用）")
     parser.add_argument("--batch", type=int, default=20, help="1バッチあたりの処理件数（--all 時に有効、デフォルト20）")
     return parser.parse_args()
 
 
 def get_config(args: argparse.Namespace) -> dict:
-    """環境変数とコマンドライン引数から設定を構築"""
+    """コマンドライン引数から設定を構築。環境変数は認証情報のみに使う"""
     return {
         "discord_webhook_url": os.getenv("DISCORD_WEBHOOK_URL", ""),
-        "hours_back": args.hours or int(os.getenv("HOURS_BACK", "24")),
-        "max_emails": int(os.getenv("MAX_EMAILS", "50")),
-        "dry_run": args.dry_run or os.getenv("DRY_RUN", "false").lower() == "true",
+        "hours_back": args.hours,
+        "dry_run": args.dry_run,
     }
 
 
@@ -323,7 +322,7 @@ def main() -> None:
     logger = setup_logging()
 
     mode = "全メール" if args.all else "未読メール"
-    hours_label = f"直近{config['hours_back']}時間の" if not args.all or args.hours else ""
+    hours_label = f"直近{args.hours}時間の" if args.hours else "全期間の"
     target = f"{hours_label}{mode}"
     logger.info(f"開始: {target}取得 (dry_run={config['dry_run']})")
 
@@ -342,10 +341,9 @@ def main() -> None:
         # メール取得・処理
         if args.all:
             # --all: ID一覧を先に取得し、バッチごとにメタデータ取得→分類→アクション
-            hours = args.hours if args.hours else None
-            query = gmail_fetch.all_query(hours)
+            query = gmail_fetch.all_query(args.hours)
             t0 = time.monotonic()
-            message_ids = gmail_fetch.fetch_all_message_ids(creds, hours, logger)
+            message_ids = gmail_fetch.fetch_all_message_ids(creds, args.hours, logger)
 
             if not message_ids:
                 logger.info("対象メールなし。終了します。")
@@ -367,7 +365,7 @@ def main() -> None:
         else:
             query = gmail_fetch.unread_query(config["hours_back"])
             t0 = time.monotonic()
-            emails = gmail_fetch.fetch_unread_emails(creds, config["hours_back"], config["max_emails"])
+            emails = gmail_fetch.fetch_unread_emails(creds, config["hours_back"])
             timings["fetch"] = time.monotonic() - t0
             logger.info(f"取得: {len(emails)}通")
 

@@ -6,7 +6,6 @@ Jev は文字列を生成せず、型付きの設問を 1 パスで評価して�
 
 import json
 import logging
-import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -21,16 +20,18 @@ SKILL_FILE = BASE_DIR / "SKILL.md"
 QUESTION_KEY = "action"
 VALID_ACTIONS = ("important", "keep", "delete")
 
+MODEL = "jev-latest"
+CONCURRENCY = 8
+# 判定をそのまま採用する confidence の下限。下回った分だけ Claude の再判定に回す
+CONFIDENCE_THRESHOLD = 0.5
+# ゴミ箱送りは取り消しに手間がかかるため高くする
+DELETE_THRESHOLD = 0.9
 
-def _thresholds() -> dict[str, float]:
-    """判定を採用する confidence の下限。import 時に読むと load_dotenv() より先になるため実行時に読む"""
-    default = float(os.getenv("JEV_CONFIDENCE_THRESHOLD", "0.5"))
-    return {
-        "important": default,
-        "keep": default,
-        # ゴミ箱送りは取り消しに手間がかかるため高くする
-        "delete": float(os.getenv("JEV_DELETE_THRESHOLD", "0.9")),
-    }
+THRESHOLDS = {
+    "important": CONFIDENCE_THRESHOLD,
+    "keep": CONFIDENCE_THRESHOLD,
+    "delete": DELETE_THRESHOLD,
+}
 
 
 def _build_question() -> Choice:
@@ -92,14 +93,12 @@ def _escalate(emails: list[dict], logger: logging.Logger) -> dict[str, dict]:
 def classify(emails: list[dict], logger: logging.Logger) -> dict:
     """メール一覧を分類する。Jev で並列判定し、低信頼分のみ Claude へ回す"""
     question = _build_question()
-    thresholds = _thresholds()
-    concurrency = int(os.getenv("JEV_CONCURRENCY", "8"))
 
-    with TypeSafeClient(model=os.getenv("TYPESAFE_MODEL", "jev-latest")) as client:
-        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+    with TypeSafeClient(model=MODEL) as client:
+        with ThreadPoolExecutor(max_workers=CONCURRENCY) as pool:
             verdicts = list(
                 pool.map(
-                    lambda e: _classify_one(client, question, e, thresholds), emails
+                    lambda e: _classify_one(client, question, e, THRESHOLDS), emails
                 )
             )
 
