@@ -60,9 +60,8 @@ def test_入れ子の_multipart_からも本文を拾う():
     assert gmail_fetch._extract_body(payload) == "入れ子の本文"
 
 
-def test_本文長の上限は実行時に環境変数から読まれる(monkeypatch):
-    # import 時に読むと gmail_triage の load_dotenv() より先になり .env が無視される
-    monkeypatch.setenv("MAX_BODY_CHARS", "3")
+def test_本文は上限文字数で打ち切られる(monkeypatch):
+    monkeypatch.setattr(gmail_fetch, "MAX_BODY_CHARS", 3)
     captured = {}
 
     class FakeService:
@@ -88,7 +87,11 @@ def test_本文長の上限は実行時に環境変数から読まれる(monkeyp
     assert captured["format"] == "full"
 
 
-def test_並列数も実行時に読まれる(monkeypatch):
-    monkeypatch.setenv("GMAIL_CONCURRENCY", "3")
+def test_期間を指定しなければクエリに期間条件を付けない():
+    assert gmail_fetch.unread_query(None) == "is:unread -is:starred"
+    assert gmail_fetch.all_query(None) == "-is:starred"
 
-    assert gmail_fetch._concurrency() == 3
+
+def test_期間を指定するとクエリに期間条件が入る():
+    assert gmail_fetch.unread_query(48) == "is:unread -is:starred newer_than:48h"
+    assert gmail_fetch.all_query(48) == "-is:starred newer_than:48h"

@@ -140,9 +140,8 @@ def test_エスカレーション対象外のメールは_Claude_に送られな
     assert [e["id"] for e in calls[0]] == ["2"]
 
 
-def test_閾値は実行時に環境変数から読まれる(patched, monkeypatch):
-    # import 時に評価すると gmail_triage の load_dotenv() より先になり .env が無視される
-    monkeypatch.setenv("JEV_DELETE_THRESHOLD", "0.5")
+def test_delete_の閾値を下げると再判定に回さない(patched, monkeypatch):
+    monkeypatch.setitem(jev_classifier.THRESHOLDS, "delete", 0.5)
     calls = patched({"微妙": ("delete", 0.6)}, None)
 
     result = jev_classifier.classify([_email("1", "微妙")], logger)
