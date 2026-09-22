@@ -1,6 +1,7 @@
-"""MIME ツリーからの本文抽出と、環境変数の読み取りタイミングを検証する"""
+"""MIME ツリーからの本文抽出と、対象メールの絞り込み条件を検証する"""
 
 import base64
+import logging
 
 import gmail_fetch
 
@@ -93,3 +94,55 @@ def test_対象は受信トレイのスターなしに限られる():
 
 def test_期間を指定するとクエリに期間条件が入る():
     assert gmail_fetch.triage_query(48) == "in:inbox -is:starred newer_than:48h"
+
+
+class _FakeList:
+    """q ごとに返すメッセージを差し替える messages().list のスタブ"""
+
+    def __init__(self, by_query: dict[str, list[dict]]):
+        self.by_query = by_query
+        self.queries = []
+
+    def users(self):
+        return self
+
+    def messages(self):
+        return self
+
+    def list(self, **kw):
+        self.queries.append(kw["q"])
+        self._result = {"messages": self.by_query.get(kw["q"], [])}
+        return self
+
+    def execute(self):
+        return self._result
+
+
+def test_スター付きスレッドの別メッセージも対象から外れる(monkeypatch, caplog):
+    fake = _FakeList(
+        {
+            "in:inbox -is:starred": [
+                {"id": "m1", "threadId": "t1"},
+                {"id": "m2", "threadId": "t2"},
+            ],
+            # t1 の別の1通にスターが付いている
+            "in:inbox is:starred": [{"id": "m9", "threadId": "t1"}],
+        }
+    )
+    monkeypatch.setattr(gmail_fetch, "_gmail_service", lambda creds: fake)
+
+    kept = gmail_fetch.fetch_message_ids(None, None, logging.getLogger())
+
+    assert [m["id"] for m in kept] == ["m2"]
+
+
+def test_スター付きスレッドを探すクエリは期間で絞らない(monkeypatch):
+    fake = _FakeList({})
+    monkeypatch.setattr(gmail_fetch, "_gmail_service", lambda creds: fake)
+
+    gmail_fetch.fetch_message_ids(None, 24, logging.getLogger())
+
+    assert fake.queries == [
+        "in:inbox -is:starred newer_than:24h",
+        "in:inbox is:starred",
+    ]

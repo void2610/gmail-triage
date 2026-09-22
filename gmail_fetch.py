@@ -32,6 +32,10 @@ def triage_query(hours_back: int | None) -> str:
     return "in:inbox -is:starred" + _hours_filter(hours_back)
 
 
+# 期間で絞らない: 古いメッセージにスターが付いたスレッドも守る必要がある
+STARRED_QUERY = "in:inbox is:starred"
+
+
 def _gmail_service(creds: Credentials):
     """httplib2 がスレッドセーフでないため、service はスレッドごとに作る"""
     if not hasattr(_thread_local, "service"):
@@ -106,11 +110,8 @@ def _fetch_fields_parallel(creds: Credentials, message_ids: list[dict]) -> list[
         )
 
 
-def fetch_message_ids(
-    creds: Credentials, hours_back: int | None, logger: logging.Logger
-) -> list[dict]:
-    """対象メールのID一覧を取得（ページネーション対応、本文は取得しない）"""
-    query = triage_query(hours_back)
+def _list_messages(creds: Credentials, query: str) -> list[dict]:
+    """list API をページネーションしながら辿る。返る要素は id と threadId だけ"""
     all_messages = []
     page_token = None
 
@@ -122,15 +123,33 @@ def fetch_message_ids(
             .list(userId="me", q=query, maxResults=PAGE_SIZE, pageToken=page_token)
             .execute()
         )
-        messages = results.get("messages", [])
-        if messages:
-            all_messages.extend(messages)
+        all_messages.extend(results.get("messages", []))
         page_token = results.get("nextPageToken")
         if not page_token:
             break
 
-    logger.info(f"全メールID取得: {len(all_messages)}通")
     return all_messages
+
+
+def starred_thread_ids(creds: Credentials) -> set[str]:
+    """スター付きメッセージが属するスレッドの ID 集合"""
+    return {m["threadId"] for m in _list_messages(creds, STARRED_QUERY)}
+
+
+def fetch_message_ids(
+    creds: Credentials, hours_back: int | None, logger: logging.Logger
+) -> list[dict]:
+    """対象メールのID一覧を取得（本文は取得しない）"""
+    messages = _list_messages(creds, triage_query(hours_back))
+    # スターはメッセージ単位に付くため、返信で増えた別の1通は -is:starred をすり抜ける。
+    # ユーザーはスレッド単位で保護したつもりなので、スレッドごと対象から外す
+    starred = starred_thread_ids(creds)
+    kept = [m for m in messages if m["threadId"] not in starred]
+
+    excluded = len(messages) - len(kept)
+    suffix = f"（スター付きスレッド {excluded}通を除外）" if excluded else ""
+    logger.info(f"対象ID取得: {len(kept)}通{suffix}")
+    return kept
 
 
 def fetch_email_batch(creds: Credentials, message_ids: list[dict]) -> list[dict]:
