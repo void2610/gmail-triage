@@ -1,1 +1,1 @@
-{"test": "uv run pytest -q", "format": "ruff format gmail_fetch.py jev_classifier.py claude_cli.py tests/"}
+{"test": "uv run pytest -q", "format": "ruff format gmail_fetch.py jev_classifier.py claude_cli.py log_format.py tests/"}
