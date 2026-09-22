@@ -23,32 +23,35 @@ cron (毎朝 7:00)
 
 ```
 gmail-triage/
-├── gmail_triage.py       # メインスクリプト
-├── SKILL.md              # Claude Code 用スキル（分類ルール）
-├── config.json           # 設定ファイル（Webhook URL 等）
+├── gmail_triage.py       # 認証・ラベル操作・通知・オーケストレーション
+├── gmail_fetch.py        # Gmail からの取得と本文の平文化
+├── jev_classifier.py     # Jev による分類と confidence ゲーティング
+├── claude_cli.py         # Claude CLI 呼び出し（再判定・要約）
+├── log_format.py         # 実行ログの桁揃え・色付け
+├── SKILL.md              # Claude 再判定用の分類ルール
+├── triage_questions.json # Jev の設問定義
+├── .env                  # 認証情報（git管理外）
 ├── credentials.json      # Google OAuth クライアント（git管理外）
 ├── token.json            # OAuth トークン（git管理外、自動生成）
 ├── logs/                 # 実行ログ
 │   └── triage_YYYYMMDD_HHMM.log
-├── requirements.txt
+├── tests/
+├── pyproject.toml
 ├── .gitignore
 └── README.md
 ```
 
-## config.json
+## 設定
 
-```json
-{
-  "discord_webhook_url": "https://discord.com/api/webhooks/XXXX/YYYY",
-  "hours_back": 24,
-  "max_emails": 50,
-  "dry_run": false
-}
+`.env` に置くのは認証情報だけ:
+
+```
+TYPESAFE_API_KEY=ts-XXXXXXXX
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/XXXX/YYYY
 ```
 
-- `hours_back`: 何時間前までのメールを対象にするか
-- `max_emails`: 1回の実行で処理する最大件数
-- `dry_run`: `true` にすると削除を実行せずログのみ出力
+対象範囲 (`--hours` / `--all` / `--batch`) と実行モード (`--dry-run`) は CLI 引数で指定する。
+閾値・並列数・本文長上限などのチューニング値は各モジュールの定数として持つ。
 
 ## SKILL.md（分類ルール）
 
@@ -120,9 +123,9 @@ JSON 形式で応答させる:
 ### 1. 初期化
 
 ```
-config.json 読み込み
+.env 読み込み（認証情報のみ）
 ログ設定（stdout + ファイル）
-コマンドライン引数パース（--dry-run, --hours）
+コマンドライン引数パース（--dry-run, --hours, --all, --batch）
 ```
 
 ### 2. Gmail API 認証
@@ -242,7 +245,7 @@ Gmail API: users.messages.trash(id=メールID)
 (行ごとに時刻が重複しないようにするため)、末尾に `log_format.summary` の終了サマリを付ける。
 
 ```
-2026-04-17 07:00:01 [INFO] 開始: 直近24時間の未読メール取得 (dry_run=False)
+2026-04-17 07:00:01 [INFO] 開始: 全期間の未読メール取得 (dry_run=False)
 2026-04-17 07:00:02 [INFO] 取得: 19通
 2026-04-17 07:00:06 [INFO]
   判定        根拠                      操作        差出人               件名
@@ -251,8 +254,8 @@ Gmail API: users.messages.trash(id=メールID)
   delete      Jev 1.00                  ゴミ箱へ    Quora                 Quoraダイジェスト
 2026-04-17 07:00:07 [INFO]
 ── サマリ ────────────────────────────────────────────────────
-  対象    : 直近24時間の未読メール
-  クエリ  : is:unread -is:starred newer_than:24h
+  対象    : 全期間の未読メール
+  クエリ  : is:unread -is:starred
   取得    : 19通 (1.2秒)
   分類    : important=1 keep=6 delete=12 / Claude再判定 2通 (3.4秒)
   操作    : ゴミ箱 12通 / ラベルのみ 7通
@@ -300,7 +303,7 @@ python gmail_triage.py --dry-run
 ### 4. Discord Webhook
 
 1. Discord サーバーの通知用チャンネルで Webhook を作成
-2. Webhook URL を `config.json` の `discord_webhook_url` に設定
+2. Webhook URL を `.env` の `DISCORD_WEBHOOK_URL` に設定
 
 ### 5. cron 登録
 
@@ -312,10 +315,14 @@ crontab -e
 ## コマンドライン引数
 
 ```
-python gmail_triage.py              # 通常実行
-python gmail_triage.py --dry-run    # 削除せずプレビュー
-python gmail_triage.py --hours 48   # 直近48時間を対象
+uv run gmail-triage              # 未読メール、期間指定なし
+uv run gmail-triage --dry-run    # 削除せずプレビュー
+uv run gmail-triage --hours 48    # 直近48時間に絞る
+uv run gmail-triage --all         # 未読以外も対象にする
+uv run gmail-triage --all --batch 10  # バッチサイズを変える
 ```
+
+`--all` は未読条件を、`--hours` は期間条件を外す。2 つは独立している。
 
 ## 運用メモ
 

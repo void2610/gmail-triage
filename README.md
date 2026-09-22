@@ -25,9 +25,9 @@ cron (毎朝 7:00)
 | `claude_cli.py` | Claude CLI 呼び出し（再判定・要約） |
 | `log_format.py` | 実行ログの桁揃え・色付け |
 
-環境変数は**どのモジュールも import 時ではなく実行時に読む**。
-`gmail_triage.py` が `load_dotenv()` を呼ぶより先に各モジュールが import されるため、
-モジュール定数として `os.getenv` を書くと `.env` の設定が黙って無視される。
+チューニング値は環境変数ではなく各モジュールの定数で持つ (`jev_classifier.THRESHOLDS`、
+`gmail_fetch.MAX_BODY_CHARS` / `CONCURRENCY` 等)。
+`.env` から読むのは `TYPESAFE_API_KEY` と `DISCORD_WEBHOOK_URL` の 2 つだけ。
 
 ### なぜ Jev か
 
@@ -53,12 +53,12 @@ Jev は文字列を生成せず、型付きの設問を 1 パスで並列評価�
 
 再判定は該当メールをまとめて 1 回の Claude 呼び出しに送るため、エスカレーション率が上がっても呼び出し回数は増えない。
 
-判定には件名・差出人に加えて**本文全文**を渡す (`MAX_BODY_CHARS` で上限、既定 4000 文字)。
+判定には件名・差出人に加えて**本文全文**を渡す (`gmail_fetch.MAX_BODY_CHARS` で上限、4000 文字)。
 Jev の入力は 100 万トークンあたり $0.042 と安いので、本文を渡すコストより誤判定を減らす利得が大きい。
 実際、Cloudflare の「請求書がご利用いただけます」は件名だけでは `important` 寄り (0.52) だったが、
 本文に請求額 $0 が含まれることで `delete` (0.80) に動いた。
 
-本文取得は 1 通ずつの API 呼び出しになるため、`GMAIL_CONCURRENCY` (既定 8) で並列化している。
+本文取得は 1 通ずつの API 呼び出しになるため、`gmail_fetch.CONCURRENCY` (8) で並列化している。
 
 ### confidence ゲーティング
 
@@ -112,15 +112,11 @@ cp .env.example .env
 
 ```
 TYPESAFE_API_KEY=ts-XXXXXXXX
-TYPESAFE_MODEL=jev-latest
-JEV_CONCURRENCY=8
-JEV_CONFIDENCE_THRESHOLD=0.5
-JEV_DELETE_THRESHOLD=0.9
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/XXXX/YYYY
-HOURS_BACK=24
-MAX_EMAILS=50
-DRY_RUN=false
 ```
+
+`.env` に置くのは認証情報だけ。
+対象範囲は CLI 引数で指定し、閾値や並列数などのチューニング値は各モジュールの定数として持つ。
 
 ### 5. 初回認証
 
@@ -168,7 +164,7 @@ crontab -e
 ## 使い方
 
 ```bash
-# 通常実行（直近24時間の未読メール）
+# 通常実行（未読メール全期間）
 uv run gmail-triage
 
 # ドライラン（削除せずプレビュー）
@@ -189,7 +185,10 @@ uv run gmail-triage --all --batch 10
 
 ### --all モード
 
-受信トレイの全メールを対象にする。バッチ単位（デフォルト20件）でメタデータ取得→分類→アクション実行を繰り返す。`--hours` を指定しなければ時間制限なし。バッチごとに Discord 通知が送信され、全バッチ完了後に合計サマリーも通知される。
+受信トレイの全メールを対象にする。バッチ単位（デフォルト20件）でメタデータ取得→分類→アクション実行を繰り返す。バッチごとに Discord 通知が送信され、全バッチ完了後に合計サマリーも通知される。
+
+`--all` が外すのは未読条件で、`--hours` が外すのは期間条件。独立しているので好きな組み合わせで指定できる。
+`--hours` を省略すればどちらのモードでも期間で絞らない。スター付きは常に対象外。
 
 ## ログの読み方
 
@@ -224,7 +223,7 @@ uv run gmail-triage --all --batch 10
 
 `examples` を 2 行足しただけでエスカレーション率が 22.5% → 12.5% に下がり、判定ラベルは 1 件も変わらなかった実績がある。閾値を動かすより先に `examples` を試すとよい。
 
-閾値は `.env` の `JEV_CONFIDENCE_THRESHOLD` / `JEV_DELETE_THRESHOLD` で調整する。誤削除が気になるなら `JEV_DELETE_THRESHOLD` を上げる (Claude 再判定に回る件数が増える)。
+閾値は `jev_classifier.py` の `CONFIDENCE_THRESHOLD` / `DELETE_THRESHOLD` で調整する。誤削除が気になるなら `DELETE_THRESHOLD` を上げる (Claude 再判定に回る件数が増える)。
 
 ## テスト
 
