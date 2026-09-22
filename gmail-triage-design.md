@@ -50,7 +50,7 @@ TYPESAFE_API_KEY=ts-XXXXXXXX
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/XXXX/YYYY
 ```
 
-対象範囲 (`--hours` / `--all` / `--batch`) と実行モード (`--dry-run`) は CLI 引数で指定する。
+対象範囲 (`--hours` / `--batch`) と実行モード (`--dry-run`) は CLI 引数で指定する。
 閾値・並列数・本文長上限などのチューニング値は各モジュールの定数として持つ。
 
 ## SKILL.md（分類ルール）
@@ -125,7 +125,7 @@ JSON 形式で応答させる:
 ```
 .env 読み込み（認証情報のみ）
 ログ設定（stdout + ファイル）
-コマンドライン引数パース（--dry-run, --hours, --all, --batch）
+コマンドライン引数パース（--dry-run, --hours, --batch）
 ```
 
 ### 2. Gmail API 認証
@@ -139,12 +139,12 @@ token.json なし → credentials.json で OAuth フロー（初回のみブラ�
 - スコープ: `gmail.modify`（読み取り + ゴミ箱移動に必要）
 - ライブラリ: `google-api-python-client`, `google-auth-oauthlib`
 
-### 3. 未読メール取得
+### 3. メール取得
 
 ```
 Gmail API: users.messages.list
-  query: "is:unread newer_than:{hours_back}h"
-  maxResults: config.max_emails
+  query: "-is:starred[ newer_than:{hours}h]"
+  maxResults: 500（ページネーションで全件辿る）
 
 各メールの取得フィールド:
   - id
@@ -245,7 +245,7 @@ Gmail API: users.messages.trash(id=メールID)
 (行ごとに時刻が重複しないようにするため)、末尾に `log_format.summary` の終了サマリを付ける。
 
 ```
-2026-04-17 07:00:01 [INFO] 開始: 全期間の未読メール取得 (dry_run=False)
+2026-04-17 07:00:01 [INFO] 開始: 全期間のメール取得 (dry_run=False)
 2026-04-17 07:00:02 [INFO] 取得: 19通
 2026-04-17 07:00:06 [INFO]
   判定        根拠                      操作        差出人               件名
@@ -254,8 +254,8 @@ Gmail API: users.messages.trash(id=メールID)
   delete      Jev 1.00                  ゴミ箱へ    Quora                 Quoraダイジェスト
 2026-04-17 07:00:07 [INFO]
 ── サマリ ────────────────────────────────────────────────────
-  対象    : 全期間の未読メール
-  クエリ  : is:unread -is:starred
+  対象    : 全期間のメール
+  クエリ  : -is:starred
   取得    : 19通 (1.2秒)
   分類    : important=1 keep=6 delete=12 / Claude再判定 2通 (3.4秒)
   操作    : ゴミ箱 12通 / ラベルのみ 7通
@@ -315,14 +315,11 @@ crontab -e
 ## コマンドライン引数
 
 ```
-uv run gmail-triage              # 未読メール、期間指定なし
+uv run gmail-triage              # スター以外の全メール、期間指定なし
 uv run gmail-triage --dry-run    # 削除せずプレビュー
-uv run gmail-triage --hours 48    # 直近48時間に絞る
-uv run gmail-triage --all         # 未読以外も対象にする
-uv run gmail-triage --all --batch 10  # バッチサイズを変える
+uv run gmail-triage --hours 48   # 直近48時間に絞る
+uv run gmail-triage --batch 10   # バッチサイズを変える
 ```
-
-`--all` は未読条件を、`--hours` は期間条件を外す。2 つは独立している。
 
 ## 運用メモ
 
