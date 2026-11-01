@@ -24,13 +24,13 @@ MODEL = "jev-latest"
 CONCURRENCY = 8
 # 判定をそのまま採用する confidence の下限。下回った分だけ Claude の再判定に回す
 CONFIDENCE_THRESHOLD = 0.5
-# ゴミ箱送りは取り消しに手間がかかるため高くする
-DELETE_THRESHOLD = 0.9
+# 誤った important は通知としてそのまま届くため高くする。件数が少ないので再判定のコストは小さい
+IMPORTANT_THRESHOLD = 0.8
 
 THRESHOLDS = {
-    "important": CONFIDENCE_THRESHOLD,
+    "important": IMPORTANT_THRESHOLD,
     "keep": CONFIDENCE_THRESHOLD,
-    "delete": DELETE_THRESHOLD,
+    "delete": CONFIDENCE_THRESHOLD,
 }
 
 
