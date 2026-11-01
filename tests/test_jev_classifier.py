@@ -89,18 +89,19 @@ def test_高信頼な判定はそのまま採用される(patched):
     }
 
 
-def test_delete_は閾値が高く中程度の確信ではエスカレーションされる(patched):
-    # important なら 0.8 で採用されるが、delete は 0.9 未満なので再判定に回る
+def test_important_は閾値が高く中程度の確信ではエスカレーションされる(patched):
+    # delete なら 0.7 で採用されるが、important は通知に直結するので再判定に回る
     calls = patched(
-        {"微妙": ("delete", 0.8)},
-        {"results": [{"id": "1", "action": "keep", "reason": "人間から"}]},
+        {"広告": ("delete", 0.7), "微妙": ("important", 0.7)},
+        {"results": [{"id": "2", "action": "delete", "reason": "ログインコード"}]},
     )
 
-    result = jev_classifier.classify([_email("1", "微妙")], logger)
+    result = jev_classifier.classify([_email("1", "広告"), _email("2", "微妙")], logger)
 
-    assert [e["id"] for e in calls[0]] == ["1"]
-    assert result["results"][0]["action"] == "keep"
-    assert result["results"][0]["reason"] == "Claude再判定: 人間から"
+    assert [e["id"] for e in calls[0]] == ["2"]
+    actions = {r["id"]: r["action"] for r in result["results"]}
+    assert actions == {"1": "delete", "2": "delete"}
+    assert result["results"][1]["reason"] == "Claude再判定: ログインコード"
     assert result["stats"]["escalated"] == 1
 
 
@@ -117,7 +118,7 @@ def test_Jev_の_API_エラーはエスカレーションに回る(patched):
 
 
 def test_エスカレーションも失敗したメールは消さずに残す(patched):
-    patched({"微妙": ("delete", 0.5)}, None)
+    patched({"微妙": ("delete", 0.3)}, None)
 
     result = jev_classifier.classify([_email("1", "微妙")], logger)
 
@@ -131,20 +132,10 @@ def test_エスカレーションも失敗したメールは消さずに残す(p
 
 def test_エスカレーション対象外のメールは_Claude_に送られない(patched):
     calls = patched(
-        {"広告": ("delete", 0.99), "微妙": ("delete", 0.6)},
+        {"広告": ("delete", 0.99), "微妙": ("delete", 0.3)},
         {"results": [{"id": "2", "action": "keep", "reason": "不明"}]},
     )
 
     jev_classifier.classify([_email("1", "広告"), _email("2", "微妙")], logger)
 
     assert [e["id"] for e in calls[0]] == ["2"]
-
-
-def test_delete_の閾値を下げると再判定に回さない(patched, monkeypatch):
-    monkeypatch.setitem(jev_classifier.THRESHOLDS, "delete", 0.5)
-    calls = patched({"微妙": ("delete", 0.6)}, None)
-
-    result = jev_classifier.classify([_email("1", "微妙")], logger)
-
-    assert calls == []
-    assert result["results"][0]["action"] == "delete"
