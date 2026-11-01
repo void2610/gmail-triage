@@ -35,6 +35,8 @@ BASE_DIR = Path(__file__).resolve().parent
 CREDENTIALS_FILE = BASE_DIR / "credentials.json"
 TOKEN_FILE = BASE_DIR / "token.json"
 LOG_DIR = BASE_DIR / "logs"
+# Discord の embed field.value の上限。超えると通知ごと 400 で弾かれる
+DISCORD_FIELD_VALUE_LIMIT = 1024
 
 
 def setup_logging() -> logging.Logger:
@@ -183,6 +185,19 @@ def execute_actions(service, classification: dict, dry_run: bool, label_ids: dic
     return operations
 
 
+def _fit_field_value(lines: list[str], limit: int = DISCORD_FIELD_VALUE_LIMIT) -> str:
+    """上限に収まる行だけを残し、溢れた件数を末尾に添える"""
+    overflow_room = len(f"\n…ほか {len(lines)} 件")
+    text = ""
+    for i, line in enumerate(lines):
+        joined = f"{text}\n{line}" if text else line
+        is_last = i == len(lines) - 1
+        if len(joined) + (0 if is_last else overflow_room) > limit:
+            return f"{text}\n…ほか {len(lines) - i} 件"
+        text = joined
+    return text
+
+
 def send_discord_notification(classification: dict, config: dict, logger: logging.Logger, *, label: str = "") -> None:
     """Discord Webhook で重要・確認メールの要約を通知"""
     webhook_url = config["discord_webhook_url"]
@@ -199,7 +214,7 @@ def send_discord_notification(classification: dict, config: dict, logger: loggin
     fields = []
 
     if important_items:
-        value = "\n".join(f"• {item.get('summary', item.get('reason', ''))}" for item in important_items)
+        value = _fit_field_value([f"• {item.get('summary', item.get('reason', ''))}" for item in important_items])
         fields.append({"name": f"🔴 重要 ({len(important_items)})", "value": value})
 
     stats_text = (
