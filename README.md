@@ -219,6 +219,10 @@ uv run gmail-triage --batch 10
 
 `examples` を 2 行足しただけでエスカレーション率が 22.5% → 12.5% に下がり、判定ラベルは 1 件も変わらなかった実績がある。閾値を動かすより先に `examples` を試すとよい。
 
+あるカテゴリから外したいメールは、外す側の `not_for` より**行き先の `examples`** に書く。
+全期間 382 通の実行 (2026-11-01) では、ログインコード・本人のログイン通知・サービスの一斉告知が確信度 0.8〜1.0 で important に入り、important が 54 通になった。
+一斉告知を important の `not_for` に並べただけでは 14 通が important に残り、keep の `examples` に置き場所を足して初めて動いた。
+
 閾値は `jev_classifier.py` の `CONFIDENCE_THRESHOLD` / `DELETE_THRESHOLD` で調整する。誤削除が気になるなら `DELETE_THRESHOLD` を上げる (Claude 再判定に回る件数が増える)。
 
 ## テスト
