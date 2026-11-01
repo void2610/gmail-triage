@@ -89,12 +89,13 @@ def _extract_email_fields(service, msg_info: dict) -> dict:
         .execute()
     )
     payload = msg.get("payload", {})
-    headers = {h["name"]: h["value"] for h in payload.get("headers", [])}
+    # ヘッダ名は大文字小文字を区別しない (RFC 5322)。楽天カードは subject / from を小文字で送ってくる
+    headers = {h["name"].lower(): h["value"] for h in payload.get("headers", [])}
     return {
         "id": msg_info["id"],
-        "from": headers.get("From", ""),
-        "subject": headers.get("Subject", ""),
-        "date": headers.get("Date", ""),
+        "from": headers.get("from", ""),
+        "subject": headers.get("subject", ""),
+        "date": headers.get("date", ""),
         "snippet": msg.get("snippet", ""),
         "body": _extract_body(payload)[:MAX_BODY_CHARS],
     }
