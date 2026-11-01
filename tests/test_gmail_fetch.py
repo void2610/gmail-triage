@@ -88,6 +88,36 @@ def test_本文は上限文字数で打ち切られる(monkeypatch):
     assert captured["format"] == "full"
 
 
+def test_小文字のヘッダ名からも差出人と件名を拾う():
+    class FakeService:
+        def users(self):
+            return self
+
+        def messages(self):
+            return self
+
+        def get(self, **kw):
+            return self
+
+        def execute(self):
+            return {
+                "payload": {
+                    "headers": [
+                        {"name": "subject", "value": "ご請求金額のご案内"},
+                        {"name": "from", "value": "楽天カード <info@example.com>"},
+                        {"name": "Date", "value": "Fri, 23 Oct 2026 16:32:12 +0900"},
+                    ],
+                    **_part("text/plain", "本文"),
+                },
+            }
+
+    email = gmail_fetch._extract_email_fields(FakeService(), {"id": "1"})
+
+    assert email["subject"] == "ご請求金額のご案内"
+    assert email["from"] == "楽天カード <info@example.com>"
+    assert email["date"] == "Fri, 23 Oct 2026 16:32:12 +0900"
+
+
 def test_対象は受信トレイのスターなしに限られる():
     assert gmail_fetch.triage_query(None) == "in:inbox -is:starred"
 
